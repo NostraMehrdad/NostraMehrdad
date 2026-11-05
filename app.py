@@ -75,7 +75,7 @@ def find_significant_nodes(df, atr_mult=1.2, lookback=4):
     if df is None or len(df) < 30:
         return []
 
-    atr = calculate_atr(df).fillna(method='bfill')
+    atr = calculate_atr(df).bfill()
     highs = df['high'].values
     lows = df['low'].values
     closes = df['close'].values
