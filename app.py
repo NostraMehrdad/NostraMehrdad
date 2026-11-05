@@ -41,7 +41,7 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         # دریافت داده‌های کندل‌استیک از بایننس (بدون نیاز به API Key)
-        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1h&limit=512"
+        url = f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval=1h&limit=512"
         res = requests.get(url)
         if res.status_code != 200:
             await update.message.reply_text("خطا در دریافت اطلاعات از بایننس. لطفا نام ارز (مثل BTCUSDT) را بررسی کنید.")
