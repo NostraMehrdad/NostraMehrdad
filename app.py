@@ -15,42 +15,83 @@ from flask import Flask
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# ---------------- وب‌سرور برای Render ----------------
+# ---------------- وب‌سرور Render ----------------
 app_web = Flask(__name__)
 
 @app_web.route('/')
 def home():
-    return "Kronos XT.com AI Trading Assistant & Risk Manager is active 24/7!"
+    return "Kronos XT.com Professional AI Analyst is active 24/7!"
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
     app_web.run(host="0.0.0.0", port=port)
 
-# ---------------- تنظیمات ----------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 DEFAULT_MARGIN = 5.0
 DEFAULT_LEVERAGE = 8
 
 # =========================================================
-# توابع کمکی
+# توابع دریافت داده واقعی
 # =========================================================
 
 def fetch_klines(symbol: str, interval: str, limit: int = 200):
     url = f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
     try:
         res = requests.get(url, timeout=12)
-        if res.status_code != 200:
-            return None
-        data = res.json()
-        df = pd.DataFrame(data, columns=[
-            'open_time', 'open', 'high', 'low', 'close', 'volume',
-            'close_time', 'qav', 'num_trades', 'taker_base_vol', 'taker_quote_vol', 'ignore'
-        ])
-        for col in ['open', 'high', 'low', 'close', 'volume']:
-            df[col] = df[col].astype(float)
-        return df
+        if res.status_code == 200:
+            data = res.json()
+            df = pd.DataFrame(data, columns=[
+                'open_time', 'open', 'high', 'low', 'close', 'volume',
+                'close_time', 'qav', 'num_trades', 'taker_base_vol', 'taker_quote_vol', 'ignore'
+            ])
+            for col in ['open', 'high', 'low', 'close', 'volume']:
+                df[col] = df[col].astype(float)
+            return df
     except Exception:
-        return None
+        pass
+    return None
+
+def get_funding_rate(symbol: str):
+    """دریافت فاندینگ ریت واقعی با چند تلاش"""
+    endpoints = [
+        f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={symbol}",
+        f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={symbol}"
+    ]
+    for url in endpoints:
+        try:
+            res = requests.get(url, timeout=8)
+            if res.status_code == 200:
+                data = res.json()
+                rate = float(data.get('lastFundingRate', 0)) * 100
+                next_time = int(data.get('nextFundingTime', 0)) / 1000
+                mark = float(data.get('markPrice', 0))
+                next_dt = datetime.fromtimestamp(next_time, tz=timezone.utc).strftime('%H:%M UTC')
+                return rate, next_dt, mark
+        except Exception:
+            continue
+    return None, None, None
+
+def get_recent_news(symbol: str = "BTC"):
+    """دریافت اخبار اخیر از CryptoCompare (منبع واقعی و رایگان)"""
+    try:
+        url = "https://min-api.cryptocompare.com/data/v2/news/?lang=EN&categories=BTC,ETH,Trading,Market"
+        res = requests.get(url, timeout=10)
+        if res.status_code == 200:
+            data = res.json()
+            news_list = data.get('Data', [])[:4]
+            result = []
+            for n in news_list:
+                title = n.get('title', '')[:90]
+                source = n.get('source', '')
+                result.append(f"• {title} ({source})")
+            return result if result else ["خبر جدیدی در دسترس نیست"]
+    except Exception:
+        pass
+    return ["دریافت اخبار با مشکل مواجه شد"]
+
+# =========================================================
+# اندیکاتورها و NDS
+# =========================================================
 
 def safe_rsi(close, period=14):
     delta = close.diff()
@@ -67,53 +108,39 @@ def calculate_atr(df, period=14):
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     return tr.rolling(window=period).mean()
 
-def find_significant_nodes(df, atr_mult=1.2, lookback=4):
+def find_significant_nodes(df, atr_mult=1.15, lookback=4):
     if df is None or len(df) < 30:
         return []
-
     atr = calculate_atr(df).bfill()
     highs = df['high'].values
     lows = df['low'].values
     nodes = []
-
     for i in range(lookback, len(df) - lookback):
         if highs[i] == max(highs[i-lookback:i+lookback+1]):
-            if i > 0 and (highs[i] - min(lows[i-lookback:i])) > atr.iloc[i] * atr_mult:
-                nodes.append({'type': 'high', 'price': float(highs[i]), 'idx': i})
+            if (highs[i] - min(lows[i-lookback:i])) > atr.iloc[i] * atr_mult:
+                nodes.append({'type': 'high', 'price': float(highs[i])})
         if lows[i] == min(lows[i-lookback:i+lookback+1]):
-            if i > 0 and (max(highs[i-lookback:i]) - lows[i]) > atr.iloc[i] * atr_mult:
-                nodes.append({'type': 'low', 'price': float(lows[i]), 'idx': i})
+            if (max(highs[i-lookback:i]) - lows[i]) > atr.iloc[i] * atr_mult:
+                nodes.append({'type': 'low', 'price': float(lows[i])})
     return nodes
 
 def analyze_nds_timeframe(df, tf_name: str):
     if df is None or len(df) < 50:
-        return {
-            'tf': tf_name,
-            'cycle': 'داده ناکافی',
-            'structure': '-',
-            'bias': 'خنثی',
-            'comment': 'داده کافی نیست'
-        }
+        return {'tf': tf_name, 'cycle': 'داده ناکافی', 'structure': '-', 'bias': 'خنثی', 'comment': '-'}
 
     nodes = find_significant_nodes(df)
     last_price = float(df['close'].iloc[-1])
 
     if len(nodes) < 4:
-        return {
-            'tf': tf_name,
-            'cycle': 'ساختار ناقص',
-            'structure': f'فقط {len(nodes)} نود معنادار',
-            'bias': 'خنثی',
-            'comment': 'نودهای کافی وجود ندارد'
-        }
+        return {'tf': tf_name, 'cycle': 'ساختار ناقص', 'structure': f'{len(nodes)} نود', 'bias': 'خنثی', 'comment': '-'}
 
     highs = [n for n in nodes if n['type'] == 'high']
-    lows = [n for n in nodes if n['type'] == 'low']
+    lows  = [n for n in nodes if n['type'] == 'low']
 
     last_high = highs[-1]['price'] if highs else last_price
     prev_high = highs[-2]['price'] if len(highs) >= 2 else last_high
-    last_low = lows[-1]['price'] if lows else last_price
-    prev_low = lows[-2]['price'] if len(lows) >= 2 else last_low
+    last_low  = lows[-1]['price'] if lows else last_price
+    prev_low  = lows[-2]['price'] if len(lows) >= 2 else last_low
 
     hh = last_high > prev_high
     hl = last_low > prev_low
@@ -121,47 +148,30 @@ def analyze_nds_timeframe(df, tf_name: str):
     ll = last_low < prev_low
 
     if hh and hl:
-        cycle = "سایکل صعودی (HH + HL)"
-        bias = "صعودی"
+        cycle, bias = "سایکل صعودی (HH+HL)", "صعودی"
     elif lh and ll:
-        cycle = "سایکل نزولی (LH + LL)"
-        bias = "نزولی"
+        cycle, bias = "سایکل نزولی (LH+LL)", "نزولی"
     else:
-        cycle = "رنج یا انتقالی"
-        bias = "خنثی"
+        cycle, bias = "رنج / انتقالی", "خنثی"
 
     wave = abs(last_high - last_low)
     level_86_up = last_low + wave * 0.86
     level_86_down = last_high - wave * 0.86
 
-    structure = f"آخرین سقف: {last_high:.4f} | آخرین کف: {last_low:.4f}"
-    comment = f"سطح ۸۶٪ صعودی ≈ {level_86_up:.4f} | سطح ۸۶٪ نزولی ≈ {level_86_down:.4f}"
+    structure = f"سقف: {last_high:.2f} | کف: {last_low:.2f}"
+    comment = f"۸۶٪↑ {level_86_up:.2f} | ۸۶٪↓ {level_86_down:.2f}"
 
     return {
         'tf': tf_name,
         'cycle': cycle,
         'structure': structure,
         'bias': bias,
-        'comment': comment
+        'comment': comment,
+        'level_86_up': level_86_up,
+        'level_86_down': level_86_down
     }
 
-def get_funding_rate(symbol: str):
-    try:
-        url = f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={symbol}"
-        res = requests.get(url, timeout=8)
-        if res.status_code == 200:
-            data = res.json()
-            rate = float(data.get('lastFundingRate', 0)) * 100
-            next_time = int(data.get('nextFundingTime', 0)) / 1000
-            mark = float(data.get('markPrice', 0))
-            next_dt = datetime.fromtimestamp(next_time, tz=timezone.utc).strftime('%H:%M UTC')
-            return rate, next_dt, mark
-    except Exception:
-        pass
-    return None, None, None
-
 def safe_format(value, fmt=".4f"):
-    """فرمت امن برای جلوگیری از خطای NoneType"""
     if value is None:
         return "نامشخص"
     try:
@@ -175,29 +185,38 @@ def safe_format(value, fmt=".4f"):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
-        "🤖 **سلام! دستیار جامع ترید XT.com و تحلیلگر Kronos فعال است.**\n\n"
-        "سیستم‌های فعال:\n"
-        "• مونت‌کارلو + اندیکاتورهای واقعی\n"
-        "• مدیر ریسک XT.com\n"
-        "• تحلیل NDS روی سه تایم‌فریم (۱۵م - ۴س - روزانه)\n"
-        "• فاندینگ ریت لحظه‌ای\n\n"
+        "🤖 **Kronos | تحلیلگر حرفه‌ای XT.com**\n\n"
+        "این ربات بر پایه داده‌های واقعی کار می‌کند و اولویت اصلی آن **سبک NDS** است.\n\n"
+        "قابلیت‌ها:\n"
+        "• تحلیل NDS چندتایم‌فریمی (۱۵م / ۴س / روزانه)\n"
+        "• فاندینگ ریت واقعی\n"
+        "• مدیریت ریسک XT.com\n"
+        "• مونت‌کارلو + اندیکاتورهای کلاسیک\n"
+        "• اخبار مرتبط بازار\n\n"
         "دستورات:\n"
         "`/predict BTCUSDT`\n"
-        "`/predict ETHUSDT 7 10`\n"
+        "`/predict ETHUSDT 10 8`\n"
         "`/tools`"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
 async def tools_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    tools_text = (
-        "🛠 **لیست مرجع سایت‌های تخصصی**\n\n"
-        "🔍 آن‌چین: Arkham | Lookonchain | Whale Alert | Debank | GMGN\n"
-        "🛡 امنیت: RugCheck | Honeypot | TokenSniffer | GoPlus\n"
-        "📈 چارت: DexScreener | Birdeye | GeckoTerminal | SolScan\n"
-        "⚡️ مشتقات: Coinglass | Coinalyze | Coinank | Hyperliquid\n"
-        "🔓 توکناومیکس: DefiLlama Unlocks | Tokenomist | CryptoRank"
+    tools = (
+        "🛠 **منابع حرفه‌ای مورد نیاز تریدر**\n\n"
+        "📊 چارت و ساختار:\n"
+        "• TradingView | DexScreener | Coinglass\n\n"
+        "🧬 NDS و ساختار بازار:\n"
+        "• بررسی نودها و سطح ۸۶٪ روی چارت شخصی\n\n"
+        "💰 مشتقات و فاندینگ:\n"
+        "• Coinglass | Coinalyze | Binance Futures\n\n"
+        "🐋 آن‌چین و نهنگ:\n"
+        "• Arkham | Lookonchain | Whale Alert | Debank\n\n"
+        "📰 اخبار:\n"
+        "• CryptoPanic | CoinDesk | The Block\n\n"
+        "🔓 توکناومیکس:\n"
+        "• DefiLlama | Tokenomist | CryptoRank"
     )
-    await update.message.reply_text(tools_text, parse_mode="Markdown", disable_web_page_preview=True)
+    await update.message.reply_text(tools, parse_mode="Markdown", disable_web_page_preview=True)
 
 async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
@@ -210,18 +229,17 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         margin_capital = DEFAULT_MARGIN
         leverage = DEFAULT_LEVERAGE
 
-    await update.message.reply_text(
-        f"⏳ دریافت داده‌های واقعی از سه تایم‌فریم + فاندینگ ریت + تحلیل NDS برای `{symbol}`..."
-    )
+    await update.message.reply_text(f"⏳ در حال تحلیل حرفه‌ای `{symbol}` با اولویت NDS...")
 
     try:
-        df_1h = fetch_klines(symbol, "1h", 300)
+        # دریافت داده‌های واقعی
+        df_1h  = fetch_klines(symbol, "1h", 300)
         df_15m = fetch_klines(symbol, "15m", 200)
-        df_4h = fetch_klines(symbol, "4h", 150)
-        df_1d = fetch_klines(symbol, "1d", 100)
+        df_4h  = fetch_klines(symbol, "4h", 150)
+        df_1d  = fetch_klines(symbol, "1d", 120)
 
         if df_1h is None or len(df_1h) < 60:
-            await update.message.reply_text("❌ خطا در دریافت داده. نماد را بررسی کنید.")
+            await update.message.reply_text("❌ خطا در دریافت داده واقعی از بایننس.")
             return
 
         last_price = float(df_1h['close'].iloc[-1])
@@ -234,11 +252,14 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         atr_pct = (atr / last_price) * 100
 
         funding_rate, next_funding, mark_price = get_funding_rate(symbol)
+        news = get_recent_news(symbol.replace("USDT", ""))
 
+        # تحلیل NDS (اولویت اصلی)
         nds_15m = analyze_nds_timeframe(df_15m, "۱۵ دقیقه")
-        nds_4h = analyze_nds_timeframe(df_4h, "۴ ساعته")
-        nds_1d = analyze_nds_timeframe(df_1d, "روزانه")
+        nds_4h  = analyze_nds_timeframe(df_4h, "۴ ساعته")
+        nds_1d  = analyze_nds_timeframe(df_1d, "روزانه")
 
+        # بایاس غالب از تایم‌فریم بالاتر (اولویت NDS)
         higher_bias = nds_1d['bias']
         if higher_bias == "خنثی":
             higher_bias = nds_4h['bias']
@@ -246,47 +267,60 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # مونت‌کارلو
         returns = np.diff(np.log(df_1h['close'].values))
         mu, sigma = np.mean(returns), np.std(returns)
-        simulations = np.zeros((80, 24))
-        for i in range(80):
+        simulations = np.zeros((70, 24))
+        for i in range(70):
             sim_returns = np.random.normal(mu, sigma, 24)
             simulations[i] = last_price * np.exp(np.cumsum(sim_returns))
         mean_path = np.mean(simulations, axis=0)
-        std_end = np.std(simulations[:, -1])
-        regime = "رونددار" if std_end / last_price < 0.028 else "نوسانی/پرریسک"
+        regime = "رونددار" if np.std(simulations[:, -1]) / last_price < 0.03 else "نوسانی"
 
+        # ========== منطق سیگنال با اولویت NDS ==========
         position_size = margin_capital * leverage
 
-        if mean_path[-1] > last_price * 1.006 and current_rsi < 67 and higher_bias != "نزولی":
+        # فقط زمانی سیگنال جهت‌دار می‌دهیم که NDS تایم‌فریم بالاتر تأیید کند
+        long_condition = (
+            higher_bias == "صعودی" and
+            mean_path[-1] > last_price and
+            current_rsi < 65
+        )
+        short_condition = (
+            higher_bias == "نزولی" and
+            mean_path[-1] < last_price and
+            current_rsi > 35
+        )
+
+        if long_condition:
             signal_dir = "🟢 LONG"
             entry = last_price
-            sl = last_price - (atr * 1.35)
-            tp = last_price + (atr * 2.1)
-            defense = "تز صعودی با تأیید نسبی تایم‌فریم بالاتر."
-        elif mean_path[-1] < last_price * 0.994 and current_rsi > 33 and higher_bias != "صعودی":
+            sl = last_price - (atr * 1.6)
+            tp = last_price + (atr * 2.4)
+            reason = "NDS تایم‌فریم بالاتر صعودی است و با مونت‌کارلو و RSI هم‌راستا شده."
+        elif short_condition:
             signal_dir = "🔴 SHORT"
             entry = last_price
-            sl = last_price + (atr * 1.35)
-            tp = last_price - (atr * 2.1)
-            defense = "فشار فروش با تأیید نسبی تایم‌فریم بالاتر."
+            sl = last_price + (atr * 1.6)
+            tp = last_price - (atr * 2.4)
+            reason = "NDS تایم‌فریم بالاتر نزولی است و با مونت‌کارلو و RSI هم‌راستا شده."
         else:
-            signal_dir = "⚪️ RANGE / صبر"
+            signal_dir = "⚪️ صبر / RANGE"
             entry = last_price
-            sl = last_price - (atr * 1.1)
-            tp = last_price + (atr * 1.1)
-            defense = "عدم هم‌راستایی کافی بین تایم‌فریم‌ها."
+            sl = last_price - (atr * 1.3)
+            tp = last_price + (atr * 1.3)
+            reason = "اولویت با NDS است. تایم‌فریم‌های بالاتر هم‌راستایی کافی برای ورود جهت‌دار ندارند."
 
         risk_usd = abs(entry - sl) * (position_size / entry)
+        risk_pct = (risk_usd / margin_capital) * 100
 
         # رسم نمودار
-        plt.figure(figsize=(11, 5.5))
-        plt.plot(df_1h['close'].values[-120:], color="#1f77b4", label="قیمت ۱H", linewidth=1.4)
-        last_idx = 119
-        for sim in simulations[::5]:
-            plt.plot(range(last_idx, last_idx + 24), sim, color="gray", alpha=0.07)
-        plt.plot(range(last_idx, last_idx + 24), mean_path, color="red", linewidth=2, label="میانگین مونت‌کارلو")
+        plt.figure(figsize=(11, 5.2))
+        plt.plot(df_1h['close'].values[-100:], color="#1f77b4", linewidth=1.4, label="قیمت ۱H")
+        last_idx = 99
+        for sim in simulations[::6]:
+            plt.plot(range(last_idx, last_idx+24), sim, color="gray", alpha=0.06)
+        plt.plot(range(last_idx, last_idx+24), mean_path, color="red", linewidth=2, label="مسیر میانگین")
         plt.axhline(sma_50, color="orange", linestyle="--", alpha=0.7, label="SMA50")
-        plt.title(f"Kronos XT.com | {symbol} | Bias: {higher_bias} | {regime}", fontsize=11)
-        plt.legend(loc="upper left")
+        plt.title(f"Kronos Professional | {symbol} | NDS Bias: {higher_bias}", fontsize=11)
+        plt.legend(loc="upper left", fontsize=8)
         plt.grid(True, alpha=0.3)
 
         buf = io.BytesIO()
@@ -294,53 +328,57 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buf.seek(0)
         plt.close('all')
 
-        # فرمت امن
-        funding_text = safe_format(funding_rate, ".4f") + "%" if funding_rate is not None else "نامشخص"
-        mark_text = safe_format(mark_price, ",.4f")
+        # ساخت گزارش حرفه‌ای
+        funding_text = f"{safe_format(funding_rate, '.4f')}%" if funding_rate is not None else "نامشخص"
+        mark_text = safe_format(mark_price, ",.2f")
         next_fund_text = next_funding if next_funding else "-"
 
+        news_text = "\n".join(news)
+
         caption = (
-            f"🎯 **گزارش کامل ترید XT.com + Kronos برای `{symbol}`**\n\n"
-            f"📌 **۱. مدیر ریسک**\n"
+            f"🎯 **تحلیل حرفه‌ای Kronos | `{symbol}`**\n\n"
+            f"📌 **مدیریت ریسک XT.com**\n"
             f"• مارجین: `${margin_capital}` | اهرم: `{leverage}x Isolated`\n"
             f"• حجم پوزیشن: `${position_size:.1f}`\n"
-            f"• ریسک تقریبی: `${risk_usd:.2f}`\n"
-            f"• قیمت لحظه‌ای: `{last_price:,.4f}`\n\n"
-            f"📊 **۲. اندیکاتورهای واقعی (۱H)**\n"
+            f"• ریسک این ستاپ: `${risk_usd:.2f}` ({risk_pct:.1f}% از مارجین)\n"
+            f"• قیمت: `{last_price:,.2f}`\n\n"
+            f"📊 **اندیکاتورهای واقعی**\n"
             f"• RSI(14): `{current_rsi:.1f}`\n"
-            f"• SMA 50: `{sma_50:,.4f}`\n"
-            f"• ATR(14): `{atr:.4f}` (`{atr_pct:.2f}%`)\n"
+            f"• SMA50: `{sma_50:,.2f}`\n"
+            f"• ATR(14): `{atr:.2f}` ({atr_pct:.2f}%)\n"
             f"• حجم نسبی: `{current_volume/avg_volume:.2f}x`\n"
             f"• رژیم: `{regime}`\n\n"
-            f"💰 **۳. فاندینگ ریت لحظه‌ای**\n"
-            f"• فاندینگ: `{funding_text}`\n"
+            f"💰 **فاندینگ ریت**\n"
+            f"• نرخ فعلی: `{funding_text}`\n"
             f"• زمان بعدی: `{next_fund_text}`\n"
             f"• Mark Price: `{mark_text}`\n\n"
-            f"⚖️ **۴. سیگنال**\n"
+            f"⚖️ **سیگنال نهایی (اولویت NDS)**\n"
             f"• جهت: **{signal_dir}**\n"
-            f"• ورود: `{entry:,.4f}`\n"
-            f"• حد ضرر: `{sl:,.4f}`\n"
-            f"• حد سود: `{tp:,.4f}`\n\n"
-            f"🧬 **۵. تحلیل NDS**\n\n"
-            f"**▸ روزانه:** {nds_1d['cycle']} | بایاس: **{nds_1d['bias']}**\n"
+            f"• ورود: `{entry:,.2f}`\n"
+            f"• حد ضرر: `{sl:,.2f}`\n"
+            f"• حد سود: `{tp:,.2f}`\n"
+            f"• دلیل: {reason}\n\n"
+            f"🧬 **تحلیل NDS (اولویت اصلی)**\n\n"
+            f"**روزانه:** {nds_1d['cycle']} → **{nds_1d['bias']}**\n"
             f"{nds_1d['structure']}\n{nds_1d['comment']}\n\n"
-            f"**▸ ۴ ساعته:** {nds_4h['cycle']} | بایاس: **{nds_4h['bias']}**\n"
+            f"**۴ ساعته:** {nds_4h['cycle']} → **{nds_4h['bias']}**\n"
             f"{nds_4h['structure']}\n{nds_4h['comment']}\n\n"
-            f"**▸ ۱۵ دقیقه:** {nds_15m['cycle']} | بایاس: **{nds_15m['bias']}**\n"
+            f"**۱۵ دقیقه:** {nds_15m['cycle']} → **{nds_15m['bias']}**\n"
             f"{nds_15m['structure']}\n{nds_15m['comment']}\n\n"
-            f"🛡 **۶. وکیل مدافع**\n"
-            f"• بایاس غالب: **{higher_bias}**\n"
-            f"• {defense}"
+            f"📰 **اخبار مرتبط اخیر**\n{news_text}\n\n"
+            f"🛡 **جمع‌بندی وکیل مدافع**\n"
+            f"بایاس غالب NDS: **{higher_bias}**\n"
+            f"ورود فقط زمانی توصیه می‌شود که ساختار NDS تایم‌فریم بالاتر با سایر ابزارها هم‌راستا باشد."
         )
 
         await update.message.reply_photo(photo=buf, caption=caption, parse_mode="Markdown")
 
     except Exception as e:
-        await update.message.reply_text(f"❌ خطا در پردازش:\n`{str(e)}`")
+        await update.message.reply_text(f"❌ خطا در تحلیل:\n`{str(e)}`")
 
 def main():
     if not BOT_TOKEN:
-        print("خطا: توکن ربات (BOT_TOKEN) تنظیم نشده است!")
+        print("خطا: BOT_TOKEN تنظیم نشده است!")
         return
 
     t = threading.Thread(target=run_web, daemon=True)
@@ -351,7 +389,7 @@ def main():
     application.add_handler(CommandHandler("tools", tools_command))
     application.add_handler(CommandHandler("predict", predict_command))
 
-    print("Kronos XT.com AI آماده است...")
+    print("Kronos Professional Analyst آماده است...")
     application.run_polling()
 
 if __name__ == '__main__':
