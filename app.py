@@ -51,7 +51,6 @@ def fetch_klines(symbol, interval, limit=250):
     return None
 
 def get_funding_rate(symbol):
-    """تلاش برای دریافت فاندینگ ریت واقعی از بایننس"""
     for _ in range(2):
         try:
             url = f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={symbol}"
@@ -214,7 +213,6 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         nds_15 = analyze_nds(df_15m)
         higher_bias = nds_d['bias'] if nds_d['bias'] != "خنثی" else nds_4h['bias']
 
-        # مونت‌کارلو
         returns = np.diff(np.log(df_1h['close'].values))
         mu, sigma = np.mean(returns), np.std(returns)
         n_sims, n_ahead = 70, 24
@@ -223,7 +221,6 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             simulations[i] = price * np.exp(np.cumsum(np.random.normal(mu, sigma, n_ahead)))
         mean_path = np.mean(simulations, axis=0)
 
-        # سیگنال با اولویت NDS
         if higher_bias == "صعودی" and mean_path[-1] > price and rsi < 67:
             signal = "🟢 LONG"
             entry = price
@@ -245,13 +242,12 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         risk_usd = abs(entry - sl) * (margin * lev / entry)
 
-        # ---------- نمودار ----------
+        # نمودار
         plot_df = df_1h.tail(110).copy()
         fig, ax = plt.subplots(figsize=(12, 6.3))
 
         ax.plot(plot_df['close'].values, color='#1f77b4', linewidth=1.7, label='قیمت', zorder=5)
         ax.plot(plot_df['close'].rolling(50).mean().values, color='#ff7f0e', linewidth=1.3, label='SMA50')
-
         ax.plot(plot_df['tenkan'].values, color='#2ca02c', linewidth=1.0, label='Tenkan', alpha=0.9)
         ax.plot(plot_df['kijun'].values, color='#d62728', linewidth=1.0, label='Kijun', alpha=0.9)
         ax.fill_between(range(len(plot_df)), plot_df['senkou_a'].values, plot_df['senkou_b'].values,
@@ -283,7 +279,7 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buf.seek(0)
         plt.close('all')
 
-        # ساخت متن فاندینگ
+        # متن فاندینگ
         base_symbol = symbol.replace("USDT", "")
         coinglass_url = f"https://www.coinglass.com/currencies/{base_symbol}/funding-rate"
 
@@ -295,7 +291,7 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"👉 [مشاهده فاندینگ ریت در Coinglass]({coinglass_url})"
             )
 
-        # پیام ۱
+        # پیام ۱ - بدون پارامتر اشتباه
         cap1 = (
             f"🎯 **{symbol}** | Kronos\n\n"
             f"سیگنال: **{signal}**\n"
@@ -305,7 +301,7 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"دلیل: {reason}\n\n"
             f"💰 **فاندینگ ریت:**\n{funding_text}"
         )
-        await update.message.reply_photo(photo=buf, caption=cap1, parse_mode="Markdown", disable_web_page_preview=False)
+        await update.message.reply_photo(photo=buf, caption=cap1, parse_mode="Markdown")
 
         # پیام ۲
         text2 = (
