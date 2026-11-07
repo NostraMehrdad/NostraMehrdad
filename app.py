@@ -63,7 +63,7 @@ def get_funding_rate(symbol):
                 next_str = datetime.fromtimestamp(next_ts, tz=timezone.utc).strftime('%H:%M UTC')
                 return rate, next_str, mark
         except:
-            time.sleep(0.6)
+            time.sleep(0.5)
     return None, None, None
 
 def safe_rsi(series, period=14):
@@ -213,6 +213,7 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         nds_15 = analyze_nds(df_15m)
         higher_bias = nds_d['bias'] if nds_d['bias'] != "خنثی" else nds_4h['bias']
 
+        # مونت‌کارلو
         returns = np.diff(np.log(df_1h['close'].values))
         mu, sigma = np.mean(returns), np.std(returns)
         n_sims, n_ahead = 70, 24
@@ -221,6 +222,7 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             simulations[i] = price * np.exp(np.cumsum(np.random.normal(mu, sigma, n_ahead)))
         mean_path = np.mean(simulations, axis=0)
 
+        # سیگنال با اولویت NDS
         if higher_bias == "صعودی" and mean_path[-1] > price and rsi < 67:
             signal = "🟢 LONG"
             entry = price
@@ -242,37 +244,66 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         risk_usd = abs(entry - sl) * (margin * lev / entry)
 
-        # نمودار
+        # ===================== رسم نمودار =====================
         plot_df = df_1h.tail(110).copy()
-        fig, ax = plt.subplots(figsize=(12, 6.3))
+        fig, ax = plt.subplots(figsize=(12, 6.5))
 
-        ax.plot(plot_df['close'].values, color='#1f77b4', linewidth=1.7, label='قیمت', zorder=5)
-        ax.plot(plot_df['close'].rolling(50).mean().values, color='#ff7f0e', linewidth=1.3, label='SMA50')
-        ax.plot(plot_df['tenkan'].values, color='#2ca02c', linewidth=1.0, label='Tenkan', alpha=0.9)
-        ax.plot(plot_df['kijun'].values, color='#d62728', linewidth=1.0, label='Kijun', alpha=0.9)
-        ax.fill_between(range(len(plot_df)), plot_df['senkou_a'].values, plot_df['senkou_b'].values,
-                        where=plot_df['senkou_a'] >= plot_df['senkou_b'], color='#90ee90', alpha=0.22)
-        ax.fill_between(range(len(plot_df)), plot_df['senkou_a'].values, plot_df['senkou_b'].values,
-                        where=plot_df['senkou_a'] < plot_df['senkou_b'], color='#ffb6c1', alpha=0.22)
+        # رنگ‌های ثابت
+        color_price = '#1f77b4'
+        color_sma = '#ff7f0e'
+        color_tenkan = '#2ca02c'
+        color_kijun = '#d62728'
+        color_mean = '#e41a1c'
 
+        # قیمت
+        ax.plot(plot_df['close'].values, color=color_price, linewidth=1.8, label='قیمت', zorder=5)
+
+        # SMA50
+        ax.plot(plot_df['close'].rolling(50).mean().values, color=color_sma, linewidth=1.4, label='SMA50')
+
+        # ایچیموکو
+        ax.plot(plot_df['tenkan'].values, color=color_tenkan, linewidth=1.1, label='Tenkan', alpha=0.9)
+        ax.plot(plot_df['kijun'].values, color=color_kijun, linewidth=1.1, label='Kijun', alpha=0.9)
+        ax.fill_between(range(len(plot_df)), plot_df['senkou_a'].values, plot_df['senkou_b'].values,
+                        where=plot_df['senkou_a'] >= plot_df['senkou_b'], color='#90ee90', alpha=0.25)
+        ax.fill_between(range(len(plot_df)), plot_df['senkou_a'].values, plot_df['senkou_b'].values,
+                        where=plot_df['senkou_a'] < plot_df['senkou_b'], color='#ffb6c1', alpha=0.25)
+
+        # فیبوناچی با رنگ‌های مجزا
         fibs = calculate_fibonacci(df_1h, 90)
-        fib_colors = ['#000000', '#8B0000', '#FF4500', '#FFD700', '#32CD32', '#1E90FF', '#4B0082']
-        for idx, (k, v) in enumerate(fibs.items()):
-            ax.axhline(v, color=fib_colors[idx], linestyle='--', linewidth=0.85, alpha=0.75)
-            ax.text(len(plot_df) + 1, v, f'{k}', fontsize=7.5, va='center', color=fib_colors[idx])
+        fib_colors = {
+            '0.0': '#000000',
+            '0.236': '#8B0000',
+            '0.382': '#FF4500',
+            '0.5': '#FFD700',
+            '0.618': '#32CD32',
+            '0.786': '#1E90FF',
+            '1.0': '#4B0082'
+        }
+        for k, v in fibs.items():
+            c = fib_colors.get(k, '#666666')
+            ax.axhline(v, color=c, linestyle='--', linewidth=0.9, alpha=0.8)
+            # برچسب رنگی در سمت راست (همرنگ خط)
+            ax.text(len(plot_df) + 1.5, v, f' {k}', fontsize=8, va='center', color=c, fontweight='bold')
 
+        # هاله مونت‌کارلو
         last_idx = len(plot_df) - 1
         for sim in simulations:
-            ax.plot(range(last_idx, last_idx + n_ahead), sim, color='gray', alpha=0.055, linewidth=0.8)
-        ax.plot(range(last_idx, last_idx + n_ahead), mean_path, color='red', linewidth=2.1, label='پیش‌بینی ۲۴h', zorder=6)
+            ax.plot(range(last_idx, last_idx + n_ahead), sim, color='gray', alpha=0.05, linewidth=0.7)
+        ax.plot(range(last_idx, last_idx + n_ahead), mean_path, color=color_mean, linewidth=2.2, label='پیش‌بینی ۲۴h', zorder=6)
 
+        # برچسب رنگی برای خطوط اصلی در سمت راست
+        last_price_val = plot_df['close'].iloc[-1]
+        ax.text(len(plot_df) + 1.5, last_price_val, f' {last_price_val:.1f}', fontsize=8, va='center', color=color_price, fontweight='bold')
+
+        # تنظیمات محور
         ax.yaxis.tick_right()
         ax.yaxis.set_label_position("right")
-        ax.set_ylabel("قیمت")
-        ax.set_title(f"Kronos | {symbol} | NDS: {higher_bias}", fontsize=12)
+        ax.set_ylabel("قیمت", fontsize=10)
+        ax.set_title(f"Kronos | {symbol} | NDS Bias: {higher_bias}", fontsize=12, pad=10)
         ax.legend(loc='upper left', fontsize=8, framealpha=0.92)
         ax.grid(True, alpha=0.3)
-        ax.set_xlim(0, len(plot_df) + n_ahead + 3)
+        ax.set_xlim(0, len(plot_df) + n_ahead + 6)
 
         buf = io.BytesIO()
         plt.savefig(buf, format='png', bbox_inches='tight', dpi=130)
@@ -286,12 +317,9 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if funding is not None:
             funding_text = f"`{safe_fmt(funding, '.4f')}%`\nزمان بعدی: `{next_fund}`\nMark: `{safe_fmt(mark, '.2f')}`"
         else:
-            funding_text = (
-                f"در حال حاضر از سرور در دسترس نیست\n"
-                f"👉 [مشاهده فاندینگ ریت در Coinglass]({coinglass_url})"
-            )
+            funding_text = f"در دسترس نیست\n👉 [فاندینگ ریت در Coinglass]({coinglass_url})"
 
-        # پیام ۱ - بدون پارامتر اشتباه
+        # پیام ۱
         cap1 = (
             f"🎯 **{symbol}** | Kronos\n\n"
             f"سیگنال: **{signal}**\n"
@@ -325,7 +353,7 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "🛡 **جمع‌بندی وکیل مدافع**\n"
             "اولویت تصمیم‌گیری با ساختار NDS تایم‌فریم بالاتر است.\n"
-            "در صورت عدم هم‌راستایی، صبر توصیه می‌شود.\n\n"
+            "در صورت عدم هم‌راستایی تایم‌فریم‌ها، صبر توصیه می‌شود.\n\n"
             "منابع: Coinglass • Arkham • Lookonchain • TradingView",
             parse_mode="Markdown"
         )
