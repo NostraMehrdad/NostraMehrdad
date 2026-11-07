@@ -71,7 +71,7 @@ def find_significant_nodes(df, atr_mult=1.2, lookback=4):
     if df is None or len(df) < 30:
         return []
 
-    atr = calculate_atr(df).bfill()  # ← اصلاح کامل برای pandas جدید
+    atr = calculate_atr(df).bfill()
     highs = df['high'].values
     lows = df['low'].values
     nodes = []
@@ -79,18 +79,10 @@ def find_significant_nodes(df, atr_mult=1.2, lookback=4):
     for i in range(lookback, len(df) - lookback):
         if highs[i] == max(highs[i-lookback:i+lookback+1]):
             if i > 0 and (highs[i] - min(lows[i-lookback:i])) > atr.iloc[i] * atr_mult:
-                nodes.append({
-                    'type': 'high',
-                    'price': float(highs[i]),
-                    'idx': i
-                })
+                nodes.append({'type': 'high', 'price': float(highs[i]), 'idx': i})
         if lows[i] == min(lows[i-lookback:i+lookback+1]):
             if i > 0 and (max(highs[i-lookback:i]) - lows[i]) > atr.iloc[i] * atr_mult:
-                nodes.append({
-                    'type': 'low',
-                    'price': float(lows[i]),
-                    'idx': i
-                })
+                nodes.append({'type': 'low', 'price': float(lows[i]), 'idx': i})
     return nodes
 
 def analyze_nds_timeframe(df, tf_name: str):
@@ -167,6 +159,15 @@ def get_funding_rate(symbol: str):
     except Exception:
         pass
     return None, None, None
+
+def safe_format(value, fmt=".4f"):
+    """فرمت امن برای جلوگیری از خطای NoneType"""
+    if value is None:
+        return "نامشخص"
+    try:
+        return format(value, fmt)
+    except:
+        return str(value)
 
 # =========================================================
 # دستورات ربات
@@ -293,7 +294,9 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buf.seek(0)
         plt.close('all')
 
-        funding_text = f"`{funding_rate:.4f}%`" if funding_rate is not None else "`نامشخص`"
+        # فرمت امن
+        funding_text = safe_format(funding_rate, ".4f") + "%" if funding_rate is not None else "نامشخص"
+        mark_text = safe_format(mark_price, ",.4f")
         next_fund_text = next_funding if next_funding else "-"
 
         caption = (
@@ -310,9 +313,9 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• حجم نسبی: `{current_volume/avg_volume:.2f}x`\n"
             f"• رژیم: `{regime}`\n\n"
             f"💰 **۳. فاندینگ ریت لحظه‌ای**\n"
-            f"• فاندینگ: {funding_text}\n"
+            f"• فاندینگ: `{funding_text}`\n"
             f"• زمان بعدی: `{next_fund_text}`\n"
-            f"• Mark Price: `{mark_price:,.4f}`\n\n"
+            f"• Mark Price: `{mark_text}`\n\n"
             f"⚖️ **۴. سیگنال**\n"
             f"• جهت: **{signal_dir}**\n"
             f"• ورود: `{entry:,.4f}`\n"
