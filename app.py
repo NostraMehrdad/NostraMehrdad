@@ -51,11 +51,7 @@ def fetch_klines(symbol, interval, limit=250):
     return None
 
 def get_funding_rate(symbol):
-    """
-    فاندینگ ریت واقعی با چند روش مختلف
-    اولویت: بایننس رسمی → تلاش مجدد
-    """
-    # روش ۱: بایننس رسمی
+    """تلاش برای دریافت فاندینگ ریت واقعی از بایننس"""
     for _ in range(2):
         try:
             url = f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={symbol}"
@@ -68,25 +64,7 @@ def get_funding_rate(symbol):
                 next_str = datetime.fromtimestamp(next_ts, tz=timezone.utc).strftime('%H:%M UTC')
                 return rate, next_str, mark
         except:
-            time.sleep(0.7)
-            continue
-
-    # روش ۲: تلاش با endpoint دیگر بایننس
-    try:
-        url = f"https://fapi.binance.com/fapi/v1/premiumIndex"
-        res = requests.get(url, headers=HEADERS, timeout=8)
-        if res.status_code == 200:
-            data = res.json()
-            for item in data:
-                if item.get('symbol') == symbol:
-                    rate = float(item.get('lastFundingRate', 0)) * 100
-                    next_ts = int(item.get('nextFundingTime', 0)) / 1000
-                    mark = float(item.get('markPrice', 0))
-                    next_str = datetime.fromtimestamp(next_ts, tz=timezone.utc).strftime('%H:%M UTC')
-                    return rate, next_str, mark
-    except:
-        pass
-
+            time.sleep(0.6)
     return None, None, None
 
 def safe_rsi(series, period=14):
@@ -175,7 +153,7 @@ def analyze_nds(df):
 
 def safe_fmt(v, fmt=".4f"):
     if v is None:
-        return "—"
+        return None
     try:
         return format(v, fmt)
     except:
@@ -185,7 +163,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "🤖 **Kronos | تحلیلگر حرفه‌ای XT.com**\n\n"
         "اولویت اصلی: سبک NDS\n"
-        "فاندینگ ریت + مونت‌کارلو + ایچیموکو + فیبوناچی + مدیریت ریسک\n\n"
+        "فاندینگ + مونت‌کارلو + ایچیموکو + فیبوناچی + مدیریت ریسک\n\n"
         "`/predict BTCUSDT`\n"
         "`/predict XRPUSDT 6 10`\n"
         "`/tools`"
@@ -194,13 +172,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def tools_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
-        "🛠 **منابع اصلی مورد استفاده و پیشنهادی**\n\n"
+        "🛠 **منابع اصلی**\n\n"
         "• Coinglass (فاندینگ و لیکوئیدیشن)\n"
         "• Arkham + Lookonchain (نهنگ‌ها)\n"
-        "• TradingView (چارت)\n"
+        "• TradingView\n"
         "• DexScreener + GeckoTerminal\n"
-        "• CryptoPanic + CoinDesk (اخبار)\n"
-        "• DefiLlama + Tokenomist"
+        "• CryptoPanic + DefiLlama"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
@@ -213,7 +190,7 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         margin, lev = DEFAULT_MARGIN, DEFAULT_LEVERAGE
 
-    status = await update.message.reply_text(f"⏳ تحلیل کامل `{symbol}` با اولویت NDS و فاندینگ ریت...")
+    status = await update.message.reply_text(f"⏳ تحلیل کامل `{symbol}` ...")
 
     try:
         df_1h = fetch_klines(symbol, "1h", 250)
@@ -222,7 +199,7 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         df_1d = fetch_klines(symbol, "1d", 120)
 
         if df_1h is None or len(df_1h) < 60:
-            await status.edit_text("❌ خطا در دریافت داده از بایننس.")
+            await status.edit_text("❌ خطا در دریافت داده.")
             return
 
         df_1h = add_ichimoku(df_1h)
@@ -230,7 +207,6 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rsi = float(safe_rsi(df_1h['close']).iloc[-1])
         atr = float(calculate_atr(df_1h).iloc[-1])
 
-        # فاندینگ ریت
         funding, next_fund, mark = get_funding_rate(symbol)
 
         nds_d = analyze_nds(df_1d)
@@ -238,7 +214,7 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         nds_15 = analyze_nds(df_15m)
         higher_bias = nds_d['bias'] if nds_d['bias'] != "خنثی" else nds_4h['bias']
 
-        # مونت‌کارلو ۲۴ کندل
+        # مونت‌کارلو
         returns = np.diff(np.log(df_1h['close'].values))
         mu, sigma = np.mean(returns), np.std(returns)
         n_sims, n_ahead = 70, 24
@@ -269,14 +245,13 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         risk_usd = abs(entry - sl) * (margin * lev / entry)
 
-        # ---------- نمودار کامل ----------
+        # ---------- نمودار ----------
         plot_df = df_1h.tail(110).copy()
         fig, ax = plt.subplots(figsize=(12, 6.3))
 
         ax.plot(plot_df['close'].values, color='#1f77b4', linewidth=1.7, label='قیمت', zorder=5)
         ax.plot(plot_df['close'].rolling(50).mean().values, color='#ff7f0e', linewidth=1.3, label='SMA50')
 
-        # ایچیموکو
         ax.plot(plot_df['tenkan'].values, color='#2ca02c', linewidth=1.0, label='Tenkan', alpha=0.9)
         ax.plot(plot_df['kijun'].values, color='#d62728', linewidth=1.0, label='Kijun', alpha=0.9)
         ax.fill_between(range(len(plot_df)), plot_df['senkou_a'].values, plot_df['senkou_b'].values,
@@ -284,14 +259,12 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ax.fill_between(range(len(plot_df)), plot_df['senkou_a'].values, plot_df['senkou_b'].values,
                         where=plot_df['senkou_a'] < plot_df['senkou_b'], color='#ffb6c1', alpha=0.22)
 
-        # فیبوناچی
         fibs = calculate_fibonacci(df_1h, 90)
         fib_colors = ['#000000', '#8B0000', '#FF4500', '#FFD700', '#32CD32', '#1E90FF', '#4B0082']
         for idx, (k, v) in enumerate(fibs.items()):
             ax.axhline(v, color=fib_colors[idx], linestyle='--', linewidth=0.85, alpha=0.75)
             ax.text(len(plot_df) + 1, v, f'{k}', fontsize=7.5, va='center', color=fib_colors[idx])
 
-        # هاله مونت‌کارلو
         last_idx = len(plot_df) - 1
         for sim in simulations:
             ax.plot(range(last_idx, last_idx + n_ahead), sim, color='gray', alpha=0.055, linewidth=0.8)
@@ -310,6 +283,18 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buf.seek(0)
         plt.close('all')
 
+        # ساخت متن فاندینگ
+        base_symbol = symbol.replace("USDT", "")
+        coinglass_url = f"https://www.coinglass.com/currencies/{base_symbol}/funding-rate"
+
+        if funding is not None:
+            funding_text = f"`{safe_fmt(funding, '.4f')}%`\nزمان بعدی: `{next_fund}`\nMark: `{safe_fmt(mark, '.2f')}`"
+        else:
+            funding_text = (
+                f"در حال حاضر از سرور در دسترس نیست\n"
+                f"👉 [مشاهده فاندینگ ریت در Coinglass]({coinglass_url})"
+            )
+
         # پیام ۱
         cap1 = (
             f"🎯 **{symbol}** | Kronos\n\n"
@@ -318,11 +303,9 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"حد ضرر: `{sl:.2f}`\n"
             f"حد سود: `{tp:.2f}`\n"
             f"دلیل: {reason}\n\n"
-            f"💰 **فاندینگ ریت:** `{safe_fmt(funding, '.4f')}%`\n"
-            f"زمان بعدی: `{next_fund or '—'}`\n"
-            f"Mark Price: `{safe_fmt(mark, '.2f')}`"
+            f"💰 **فاندینگ ریت:**\n{funding_text}"
         )
-        await update.message.reply_photo(photo=buf, caption=cap1, parse_mode="Markdown")
+        await update.message.reply_photo(photo=buf, caption=cap1, parse_mode="Markdown", disable_web_page_preview=False)
 
         # پیام ۲
         text2 = (
@@ -346,7 +329,7 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "🛡 **جمع‌بندی وکیل مدافع**\n"
             "اولویت تصمیم‌گیری با ساختار NDS تایم‌فریم بالاتر است.\n"
-            "در صورت عدم هم‌راستایی تایم‌فریم‌ها، صبر توصیه می‌شود.\n\n"
+            "در صورت عدم هم‌راستایی، صبر توصیه می‌شود.\n\n"
             "منابع: Coinglass • Arkham • Lookonchain • TradingView",
             parse_mode="Markdown"
         )
