@@ -17,7 +17,6 @@ from flask import Flask
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# ===================== تنظیمات =====================
 app_web = Flask(__name__)
 
 @app_web.route('/')
@@ -42,8 +41,6 @@ DEFAULT_LEVERAGE = 8
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
-
-# ===================== مدیریت کاربران =====================
 
 def load_users():
     try:
@@ -80,8 +77,6 @@ def get_remaining_days(user_id: int) -> int:
     expiry = datetime.fromisoformat(user["expiry"])
     delta = expiry - datetime.now(timezone.utc)
     return max(0, delta.days)
-
-# ===================== توابع تحلیلی =====================
 
 def fetch_klines(symbol, interval, limit=250):
     url = f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
@@ -208,19 +203,14 @@ def safe_fmt(v, fmt=".4f"):
     except:
         return str(v)
 
-# ===================== دستورات =====================
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
     text = (
         "🤖 **Kronos | دستیار هوشمند معاملاتی**\n\n"
         "این ربات خصوصی و اشتراکی است.\n\n"
-        "دستورات:\n"
         "`/buy` → خرید اشتراک ۳۰ روزه (۱۰ USDT)\n"
         "`/status` → وضعیت اشتراک\n"
-        "`/predict BTCUSDT` → تحلیل کامل (فقط مشترکین)\n"
-        "`/tools` → منابع\n\n"
-        "برای استفاده باید اشتراک فعال داشته باشید."
+        "`/predict BTCUSDT` → تحلیل کامل\n"
+        "`/tools` → منابع"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
@@ -230,8 +220,8 @@ async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"مبلغ: **{SUBSCRIPTION_PRICE} USDT**\n"
         f"شبکه: **TRC20**\n\n"
         f"آدرس ولت:\n`{USDT_WALLET}`\n\n"
-        f"پس از واریز، رسید تراکنش را برای ادمین ارسال کنید تا اشتراک شما فعال شود.\n\n"
-        f"⚠️ فقط شبکه TRC20 ارسال کنید."
+        f"پس از واریز، رسید را برای ادمین ارسال کنید.\n"
+        f"⚠️ فقط شبکه TRC20"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
@@ -239,21 +229,18 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if is_subscribed(user_id):
         days = get_remaining_days(user_id)
-        await update.message.reply_text(f"✅ اشتراک شما فعال است.\nروزهای باقی‌مانده: **{days} روز**", parse_mode="Markdown")
+        await update.message.reply_text(f"✅ اشتراک فعال\nروزهای باقی‌مانده: **{days} روز**", parse_mode="Markdown")
     else:
-        await update.message.reply_text("❌ اشتراک فعال ندارید.\nبرای خرید از دستور /buy استفاده کنید.")
+        await update.message.reply_text("❌ اشتراک فعال ندارید.\nاز /buy استفاده کنید.")
 
 async def tools_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "🛠 **منابع**\n\n"
-        "• Coinglass\n• Arkham + Lookonchain\n• TradingView\n• DexScreener\n• CryptoPanic + DefiLlama"
+    await update.message.reply_text(
+        "🛠 منابع:\nCoinglass • Arkham • Lookonchain • TradingView • DexScreener • CryptoPanic",
+        parse_mode="Markdown"
     )
-    await update.message.reply_text(text, parse_mode="Markdown")
 
-# ----- دستورات ادمین -----
 async def adduser(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
-        await update.message.reply_text("دسترسی نداری.")
         return
     if len(context.args) < 1:
         await update.message.reply_text("فرمت: /adduser <user_id>")
@@ -273,7 +260,6 @@ async def removeuser(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
     if not context.args:
-        await update.message.reply_text("فرمت: /removeuser <user_id>")
         return
     uid = str(context.args[0])
     users = load_users()
@@ -281,8 +267,6 @@ async def removeuser(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del users[uid]
         save_users(users)
         await update.message.reply_text(f"کاربر {uid} حذف شد.")
-    else:
-        await update.message.reply_text("کاربر پیدا نشد.")
 
 async def listusers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
@@ -291,18 +275,13 @@ async def listusers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not users:
         await update.message.reply_text("هیچ کاربر فعالی نیست.")
         return
-    lines = []
-    for uid, data in users.items():
-        days = get_remaining_days(int(uid))
-        lines.append(f"`{uid}` → {days} روز")
+    lines = [f"`{uid}` → {get_remaining_days(int(uid))} روز" for uid in users]
     await update.message.reply_text("کاربران فعال:\n" + "\n".join(lines), parse_mode="Markdown")
 
-# ----- دستور اصلی تحلیل -----
 async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-
     if not is_subscribed(user_id) and not is_admin(user_id):
-        await update.message.reply_text("❌ اشتراک فعال ندارید.\nاز /buy برای خرید اشتراک استفاده کنید.")
+        await update.message.reply_text("❌ اشتراک فعال ندارید.\nاز /buy استفاده کنید.")
         return
 
     args = context.args
@@ -329,6 +308,9 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         price = float(df_1h['close'].iloc[-1])
         rsi = float(safe_rsi(df_1h['close']).iloc[-1])
         atr = float(calculate_atr(df_1h).iloc[-1])
+        sma50 = float(df_1h['close'].rolling(50).mean().iloc[-1])
+        tenkan = float(df_1h['tenkan'].iloc[-1])
+        kijun = float(df_1h['kijun'].iloc[-1])
 
         funding, next_fund, mark = get_funding_rate(symbol)
         nds_d = analyze_nds(df_1d)
@@ -404,35 +386,58 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buf.seek(0)
         plt.close('all')
 
+        # ===== پیام ۱ (خط به خط) =====
         base_symbol = symbol.replace("USDT", "")
         coinglass_url = f"https://www.coinglass.com/currencies/{base_symbol}/funding-rate"
+
         if funding is not None:
-            funding_text = f"`{safe_fmt(funding, '.4f')}%` | بعدی: `{next_fund}`"
+            funding_line = f"`{safe_fmt(funding, '.4f')}%`"
         else:
-            funding_text = f"[فاندینگ در Coinglass]({coinglass_url})"
+            funding_line = f"[مشاهده در Coinglass]({coinglass_url})"
 
         cap1 = (
             f"🎯 **{symbol}**\n\n"
             f"سیگنال: **{signal}**\n"
-            f"ورود: `{entry:.2f}` | SL: `{sl:.2f}` | TP: `{tp:.2f}`\n"
+            f"ورود: `{entry:.2f}`\n"
+            f"حد ضرر: `{sl:.2f}`\n"
+            f"حد سود: `{tp:.2f}`\n"
             f"دلیل: {reason}\n\n"
-            f"💰 فاندینگ: {funding_text}"
+            f"💰 فاندینگ ریت: {funding_line}"
         )
         await update.message.reply_photo(photo=buf, caption=cap1, parse_mode="Markdown")
 
-        text2 = (
-            f"🧬 **NDS (اولویت اصلی)**\n\n"
-            f"روزانه: {nds_d['cycle']} → **{nds_d['bias']}**\n{nds_d['info']}\n\n"
-            f"۴ ساعته: {nds_4h['cycle']} → **{nds_4h['bias']}**\n{nds_4h['info']}\n\n"
-            f"۱۵ دقیقه: {nds_15['cycle']} → **{nds_15['bias']}**\n{nds_15['info']}\n\n"
-            f"بایاس غالب: **{higher_bias}**\n\n"
-            f"📌 ریسک: مارجین `${margin}` | اهرم `{lev}x` | ریسک `${risk_usd:.2f}`\n"
-            f"RSI: `{rsi:.1f}` | ATR: `{atr:.2f}`"
-        )
-        await update.message.reply_text(text2, parse_mode="Markdown")
+        # ===== پیام ۲ (تحلیل تشریحی کامل) =====
+        # توضیح موقعیت قیمت نسبت به ابزارها
+        price_vs_sma = "بالای" if price > sma50 else "زیر"
+        price_vs_tenkan = "بالای" if price > tenkan else "زیر"
+        price_vs_kijun = "بالای" if price > kijun else "زیر"
 
+        analysis_text = (
+            f"🧬 **تحلیل تشریحی {symbol}**\n\n"
+            f"**ساختار NDS (اولویت اصلی):**\n"
+            f"• روزانه: {nds_d['cycle']} → **{nds_d['bias']}**\n"
+            f"• ۴ ساعته: {nds_4h['cycle']} → **{nds_4h['bias']}**\n"
+            f"• ۱۵ دقیقه: {nds_15['cycle']} → **{nds_15['bias']}**\n"
+            f"بایاس غالب از تایم‌فریم بالاتر: **{higher_bias}**\n\n"
+            f"**وضعیت اندیکاتورها (۱ ساعته):**\n"
+            f"• RSI(14): `{rsi:.1f}`\n"
+            f"• ATR(14): `{atr:.2f}`\n"
+            f"• قیمت نسبت به SMA50: {price_vs_sma} SMA50 (`{sma50:.2f}`)\n"
+            f"• قیمت نسبت به Tenkan: {price_vs_tenkan} Tenkan (`{tenkan:.2f}`)\n"
+            f"• قیمت نسبت به Kijun: {price_vs_kijun} Kijun (`{kijun:.2f}`)\n\n"
+            f"**مدیریت ریسک:**\n"
+            f"• مارجین: `${margin}`\n"
+            f"• اهرم: `{lev}x Isolated`\n"
+            f"• حجم پوزیشن: `${margin * lev:.1f}`\n"
+            f"• ریسک این ستاپ: `${risk_usd:.2f}`"
+        )
+        await update.message.reply_text(analysis_text, parse_mode="Markdown")
+
+        # ===== پیام ۳ =====
         await update.message.reply_text(
-            "🛡 اولویت با ساختار NDS تایم‌فریم بالاتر است.\nدر صورت عدم هم‌راستایی، صبر توصیه می‌شود.",
+            "🛡 **جمع‌بندی**\n"
+            "اولویت تصمیم‌گیری با ساختار NDS تایم‌فریم بالاتر است.\n"
+            "در صورت عدم هم‌راستایی بین تایم‌فریم‌ها، صبر منطقی‌ترین انتخاب است.",
             parse_mode="Markdown"
         )
 
@@ -445,10 +450,8 @@ def main():
     if not BOT_TOKEN:
         print("BOT_TOKEN تنظیم نشده!")
         return
-
     t = threading.Thread(target=run_web, daemon=True)
     t.start()
-
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("buy", buy))
@@ -458,8 +461,7 @@ def main():
     app.add_handler(CommandHandler("adduser", adduser))
     app.add_handler(CommandHandler("removeuser", removeuser))
     app.add_handler(CommandHandler("listusers", listusers))
-
-    print("Kronos Professional با سیستم اشتراک آماده است...")
+    print("Kronos آماده است...")
     app.run_polling()
 
 if __name__ == '__main__':
