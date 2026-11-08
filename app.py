@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator, FormatStrFormatter
 
 from flask import Flask
 from telegram import Update
@@ -216,101 +217,97 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # مونت‌کارلو
         returns = np.diff(np.log(df_1h['close'].values))
         mu, sigma = np.mean(returns), np.std(returns)
-        n_sims, n_ahead = 70, 24
+        n_sims, n_ahead = 80, 24
         simulations = np.zeros((n_sims, n_ahead))
         for i in range(n_sims):
             simulations[i] = price * np.exp(np.cumsum(np.random.normal(mu, sigma, n_ahead)))
         mean_path = np.mean(simulations, axis=0)
 
-        # سیگنال با اولویت NDS
-        if higher_bias == "صعودی" and mean_path[-1] > price and rsi < 67:
+        # سیگنال با اولویت NDS + تأیید سایر ابزارها
+        if higher_bias == "صعودی" and mean_path[-1] > price and rsi < 65:
             signal = "🟢 LONG"
             entry = price
             sl = price - atr * 1.55
             tp = price + atr * 2.4
-            reason = "NDS تایم‌فریم بالاتر صعودی است"
-        elif higher_bias == "نزولی" and mean_path[-1] < price and rsi > 33:
+            reason = "NDS بالاتر صعودی + مونت‌کارلو و RSI هم‌راستا"
+        elif higher_bias == "نزولی" and mean_path[-1] < price and rsi > 35:
             signal = "🔴 SHORT"
             entry = price
             sl = price + atr * 1.55
             tp = price - atr * 2.4
-            reason = "NDS تایم‌فریم بالاتر نزولی است"
+            reason = "NDS بالاتر نزولی + مونت‌کارلو و RSI هم‌راستا"
         else:
             signal = "⚪️ صبر"
             entry = price
             sl = price - atr * 1.25
             tp = price + atr * 1.25
-            reason = "عدم تأیید کافی از NDS بالاتر"
+            reason = "عدم تأیید کافی ساختار NDS تایم‌فریم بالاتر"
 
         risk_usd = abs(entry - sl) * (margin * lev / entry)
 
-        # ===================== رسم نمودار =====================
+        # ===================== نمودار =====================
         plot_df = df_1h.tail(110).copy()
-        fig, ax = plt.subplots(figsize=(12, 6.5))
+        fig, ax = plt.subplots(figsize=(12.5, 6.8))
 
-        # رنگ‌های ثابت
         color_price = '#1f77b4'
         color_sma = '#ff7f0e'
         color_tenkan = '#2ca02c'
         color_kijun = '#d62728'
-        color_mean = '#e41a1c'
+        color_mean = '#c0392b'
 
-        # قیمت
+        # قیمت و اندیکاتورها
         ax.plot(plot_df['close'].values, color=color_price, linewidth=1.8, label='قیمت', zorder=5)
-
-        # SMA50
-        ax.plot(plot_df['close'].rolling(50).mean().values, color=color_sma, linewidth=1.4, label='SMA50')
-
-        # ایچیموکو
+        ax.plot(plot_df['close'].rolling(50).mean().values, color=color_sma, linewidth=1.35, label='SMA50')
         ax.plot(plot_df['tenkan'].values, color=color_tenkan, linewidth=1.1, label='Tenkan', alpha=0.9)
         ax.plot(plot_df['kijun'].values, color=color_kijun, linewidth=1.1, label='Kijun', alpha=0.9)
+
+        # ابر ایچیموکو
         ax.fill_between(range(len(plot_df)), plot_df['senkou_a'].values, plot_df['senkou_b'].values,
                         where=plot_df['senkou_a'] >= plot_df['senkou_b'], color='#90ee90', alpha=0.25)
         ax.fill_between(range(len(plot_df)), plot_df['senkou_a'].values, plot_df['senkou_b'].values,
                         where=plot_df['senkou_a'] < plot_df['senkou_b'], color='#ffb6c1', alpha=0.25)
 
-        # فیبوناچی با رنگ‌های مجزا
+        # فیبوناچی + قیمت دقیق با رنگ همان خط
         fibs = calculate_fibonacci(df_1h, 90)
         fib_colors = {
-            '0.0': '#000000',
+            '0.0': '#111111',
             '0.236': '#8B0000',
             '0.382': '#FF4500',
-            '0.5': '#FFD700',
-            '0.618': '#32CD32',
+            '0.5': '#DAA520',
+            '0.618': '#228B22',
             '0.786': '#1E90FF',
             '1.0': '#4B0082'
         }
         for k, v in fibs.items():
-            c = fib_colors.get(k, '#666666')
-            ax.axhline(v, color=c, linestyle='--', linewidth=0.9, alpha=0.8)
-            # برچسب رنگی در سمت راست (همرنگ خط)
-            ax.text(len(plot_df) + 1.5, v, f' {k}', fontsize=8, va='center', color=c, fontweight='bold')
+            c = fib_colors.get(k, '#555555')
+            ax.axhline(v, color=c, linestyle='--', linewidth=0.95, alpha=0.85)
+            # قیمت دقیق با رنگ همان خط
+            ax.text(len(plot_df) + 1.8, v, f' {k}  {v:.1f}', fontsize=8, va='center', color=c, fontweight='bold')
 
-        # هاله مونت‌کارلو
+        # هاله مونت‌کارلو (پررنگ‌تر)
         last_idx = len(plot_df) - 1
         for sim in simulations:
-            ax.plot(range(last_idx, last_idx + n_ahead), sim, color='gray', alpha=0.05, linewidth=0.7)
+            ax.plot(range(last_idx, last_idx + n_ahead), sim, color='gray', alpha=0.13, linewidth=0.75)
         ax.plot(range(last_idx, last_idx + n_ahead), mean_path, color=color_mean, linewidth=2.2, label='پیش‌بینی ۲۴h', zorder=6)
 
-        # برچسب رنگی برای خطوط اصلی در سمت راست
-        last_price_val = plot_df['close'].iloc[-1]
-        ax.text(len(plot_df) + 1.5, last_price_val, f' {last_price_val:.1f}', fontsize=8, va='center', color=color_price, fontweight='bold')
-
-        # تنظیمات محور
+        # تنظیمات محور قیمت (ریزتر و خواناتر)
         ax.yaxis.tick_right()
         ax.yaxis.set_label_position("right")
         ax.set_ylabel("قیمت", fontsize=10)
+        ax.yaxis.set_major_locator(MaxNLocator(nbins=12))
+        ax.yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
+
         ax.set_title(f"Kronos | {symbol} | NDS Bias: {higher_bias}", fontsize=12, pad=10)
         ax.legend(loc='upper left', fontsize=8, framealpha=0.92)
         ax.grid(True, alpha=0.3)
-        ax.set_xlim(0, len(plot_df) + n_ahead + 6)
+        ax.set_xlim(0, len(plot_df) + n_ahead + 8)
 
         buf = io.BytesIO()
-        plt.savefig(buf, format='png', bbox_inches='tight', dpi=130)
+        plt.savefig(buf, format='png', bbox_inches='tight', dpi=140)
         buf.seek(0)
         plt.close('all')
 
-        # متن فاندینگ
+        # فاندینگ
         base_symbol = symbol.replace("USDT", "")
         coinglass_url = f"https://www.coinglass.com/currencies/{base_symbol}/funding-rate"
 
