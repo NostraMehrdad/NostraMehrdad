@@ -12,7 +12,7 @@ from collections import defaultdict
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from matplotlib.ticker import MaxNLocator, FormatStrFormatter
+from matplotlib.ticker import MaxNLocator
 
 from flask import Flask
 from telegram import Update
@@ -62,6 +62,7 @@ def save_json(path, data):
         print("Save error:", e)
 
 def is_admin(uid): return uid in ADMIN_IDS
+
 def is_subscribed(uid):
     users = load_json(USERS_FILE)
     u = users.get(str(uid))
@@ -192,8 +193,7 @@ async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_private(update): return
     await update.message.reply_text(
         f"💳 **اشتراک ۳۰ روزه**\n\n"
-        f"مبلغ: **{SUBSCRIPTION_PRICE} USDT**\n"
-        f"شبکه: **TRC20**\n\n"
+        f"مبلغ: **{SUBSCRIPTION_PRICE} USDT** (TRC20)\n\n"
         f"آدرس:\n`{USDT_WALLET}`\n\n"
         f"پس از واریز، رسید را ارسال کنید.",
         parse_mode="Markdown"
@@ -317,7 +317,7 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         margin, lev = DEFAULT_MARGIN, DEFAULT_LEVERAGE
 
-    status = await update.message.reply_text(f"⏳ تحلیل `{symbol}` ...")
+    status = await update.message.reply_text(f"⏳ تحلیل عمیق `{symbol}` ...")
 
     try:
         df_1h = fetch_klines(symbol, "1h", 250)
@@ -337,6 +337,8 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sma200 = float(df_1h['close'].rolling(200).mean().iloc[-1]) if len(df_1h)>=200 else sma50
         tenkan = float(df_1h['tenkan'].iloc[-1])
         kijun = float(df_1h['kijun'].iloc[-1])
+        senkou_a = float(df_1h['senkou_a'].iloc[-1]) if not pd.isna(df_1h['senkou_a'].iloc[-1]) else price
+        senkou_b = float(df_1h['senkou_b'].iloc[-1]) if not pd.isna(df_1h['senkou_b'].iloc[-1]) else price
 
         funding, next_f, mark = get_funding(symbol)
         nds_d = analyze_nds(df_1d)
@@ -349,17 +351,42 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sims = np.array([price * np.exp(np.cumsum(np.random.normal(mu, sigma, 24))) for _ in range(60)])
         mean_path = np.mean(sims, axis=0)
 
+        # سیگنال
         if higher=="صعودی" and mean_path[-1]>price and rsi<65:
             signal, entry, sl, tp = "🟢 LONG", price, price-atr*1.55, price+atr*2.4
-            reason = "NDS بالاتر صعودی + هم‌راستایی"
+            reason = "NDS بالاتر صعودی + هم‌راستایی ابزارها"
         elif higher=="نزولی" and mean_path[-1]<price and rsi>35:
             signal, entry, sl, tp = "🔴 SHORT", price, price+atr*1.55, price-atr*2.4
-            reason = "NDS بالاتر نزولی + هم‌راستایی"
+            reason = "NDS بالاتر نزولی + هم‌راستایی ابزارها"
         else:
             signal, entry, sl, tp = "⚪️ صبر", price, price-atr*1.25, price+atr*1.25
-            reason = "عدم تأیید کافی NDS بالاتر"
+            reason = "عدم تأیید کافی از ساختار NDS بالاتر"
 
         risk = abs(entry-sl)*(margin*lev/entry)
+
+        # ---------- تحلیل عمیق‌تر ----------
+        # ایچیموکو
+        if price > max(senkou_a, senkou_b):
+            ichi_pos = "بالای ابر (حمایت نسبی)"
+        elif price < min(senkou_a, senkou_b):
+            ichi_pos = "زیر ابر (مقاومت نسبی)"
+        else:
+            ichi_pos = "داخل ابر (وضعیت خنثی و پرنوسان)"
+
+        tk_relation = "تنکان بالای کیجون (نشانه صعودی کوتاه‌مدت)" if tenkan > kijun else "تنکان زیر کیجون (نشانه نزولی کوتاه‌مدت)"
+
+        # میانگین‌ها
+        if sma20 > sma50 > sma200:
+            ma_align = "هم‌راستایی صعودی کامل (۲۰ > ۵۰ > ۲۰۰)"
+        elif sma20 < sma50 < sma200:
+            ma_align = "هم‌راستایی نزولی کامل (۲۰ < ۵۰ < ۲۰۰)"
+        else:
+            ma_align = "عدم هم‌راستایی میانگین‌ها (بازار در حال تصمیم‌گیری)"
+
+        # فیبوناچی
+        fibs = calc_fib(df_1h)
+        nearest_fib = min(fibs.items(), key=lambda x: abs(x[1]-price))
+        fib_comment = f"نزدیک‌ترین سطح فیبوناچی: {nearest_fib[0]} در حدود `{nearest_fib[1]:.1f}`"
 
         # نمودار
         plot_df = df_1h.tail(110).copy()
@@ -369,10 +396,9 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ax.plot(plot_df['close'].rolling(50).mean().values, color='#ff7f0e', lw=1.3, label='SMA50')
         ax.plot(plot_df['tenkan'].values, color='#2ca02c', lw=1.0, label='Tenkan', alpha=0.85)
         ax.plot(plot_df['kijun'].values, color='#d62728', lw=1.0, label='Kijun', alpha=0.85)
-        fibs = calc_fib(df_1h)
         for k,v in fibs.items():
-            ax.axhline(v, color='gray', ls='--', lw=0.8, alpha=0.7)
-            ax.text(len(plot_df)+1.5, v, f'{k} {v:.0f}', fontsize=7, color='#444')
+            ax.axhline(v, color='gray', ls='--', lw=0.75, alpha=0.7)
+            ax.text(len(plot_df)+1.5, v, f'{k}', fontsize=7, color='#555')
         last = len(plot_df)-1
         for s in sims[::4]:
             ax.plot(range(last, last+24), s, color='gray', alpha=0.11)
@@ -388,13 +414,9 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buf.seek(0)
         plt.close()
 
-        # فاندینگ
         base = symbol.replace("USDT","")
         glass = f"https://www.coinglass.com/currencies/{base}/funding-rate"
-        if funding is not None:
-            fund_line = f"`{safe_fmt(funding,'.4f')}%`"
-        else:
-            fund_line = f"[مشاهده در Coinglass]({glass})"
+        fund_line = f"`{safe_fmt(funding,'.4f')}%`" if funding is not None else f"[Coinglass]({glass})"
 
         # پیام ۱
         cap = (
@@ -404,38 +426,44 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"حد ضرر: `{sl:.2f}`\n"
             f"حد سود: `{tp:.2f}`\n"
             f"دلیل: {reason}\n\n"
-            f"💰 فاندینگ ریت: {fund_line}"
+            f"💰 فاندینگ: {fund_line}"
         )
         await update.message.reply_photo(photo=buf, caption=cap, parse_mode="Markdown")
 
-        # پیام ۲ - تحلیل کامل
+        # پیام ۲ - تحلیل عمیق
         text2 = (
-            f"📌 **مدیر ریسک (XT.com)**\n"
-            f"مارجین: `${margin}`\n"
-            f"اهرم: `{lev}x Isolated`\n"
+            f"📌 **مدیر ریسک**\n"
+            f"مارجین: `${margin}` | اهرم: `{lev}x`\n"
             f"حجم پوزیشن: `${margin*lev:.1f}`\n"
-            f"ریسک ستاپ: `${risk:.2f}`\n\n"
-            f"🧬 **وکیل مدافع + NDS**\n"
-            f"بایاس غالب: **{higher}**\n"
-            f"• روزانه: {nds_d['cycle']} → {nds_d['bias']}\n"
-            f"• ۴ ساعته: {nds_4h['cycle']} → {nds_4h['bias']}\n"
-            f"• ۱۵ دقیقه: {nds_15['cycle']} → {nds_15['bias']}\n\n"
-            f"**اندیکاتورها (۱H)**\n"
-            f"• RSI: `{rsi:.1f}`\n"
-            f"• ATR: `{atr:.2f}`\n"
+            f"ریسک این ستاپ: `${risk:.2f}`\n\n"
+            f"🧬 **وکیل مدافع (تحلیل عمیق)**\n\n"
+            f"**ساختار NDS**\n"
+            f"• روزانه: {nds_d['cycle']} → **{nds_d['bias']}**\n"
+            f"• ۴ ساعته: {nds_4h['cycle']} → **{nds_4h['bias']}**\n"
+            f"• ۱۵ دقیقه: {nds_15['cycle']} → **{nds_15['bias']}**\n"
+            f"بایاس غالب: **{higher}**\n\n"
+            f"**ایچیموکو**\n"
+            f"• موقعیت قیمت: {ichi_pos}\n"
+            f"• رابطه تنکان/کیجون: {tk_relation}\n\n"
+            f"**میانگین‌های متحرک**\n"
             f"• SMA20: `{sma20:.1f}`\n"
             f"• SMA50: `{sma50:.1f}`\n"
             f"• SMA200: `{sma200:.1f}`\n"
-            f"• Tenkan: `{tenkan:.1f}` | Kijun: `{kijun:.1f}`\n\n"
+            f"• وضعیت: {ma_align}\n\n"
+            f"**فیبوناچی و نوسان**\n"
+            f"• {fib_comment}\n"
+            f"• ATR: `{atr:.2f}` | RSI: `{rsi:.1f}`\n\n"
             f"**سناریوها**\n"
-            f"• صعودی: حفظ ساختار HH+HL و شکست مقاومت\n"
-            f"• نزولی: ادامه LH+LL و از دست رفتن حمایت‌ها\n"
-            f"• رنج: نوسان بین سطوح کلیدی"
+            f"• صعودی: حفظ ساختار HH+HL + شکست مقاومت‌های پیش‌رو\n"
+            f"• نزولی: ادامه LH+LL + از دست رفتن حمایت‌های کلیدی\n"
+            f"• رنج: ماندن قیمت بین سطوح مهم تا زمان شکست معتبر"
         )
         await update.message.reply_text(text2, parse_mode="Markdown")
 
         await update.message.reply_text(
-            "🛡 اولویت همیشه با ساختار NDS تایم‌فریم بالاتر است.\nدر صورت تناقض، صبر ترجیح داده می‌شود.",
+            "🛡 **جمع‌بندی نهایی**\n"
+            "اولویت تصمیم‌گیری همیشه با ساختار NDS تایم‌فریم بالاتر است.\n"
+            "در صورت تناقض بین ابزارها، صبر منطقی‌ترین انتخاب است.",
             parse_mode="Markdown"
         )
         await status.delete()
