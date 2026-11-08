@@ -7,6 +7,7 @@ import requests
 import pandas as pd
 import numpy as np
 from datetime import datetime, timezone, timedelta
+from collections import defaultdict
 
 import matplotlib
 matplotlib.use('Agg')
@@ -15,7 +16,7 @@ from matplotlib.ticker import MaxNLocator, FormatStrFormatter
 
 from flask import Flask
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 
 app_web = Flask(__name__)
 
@@ -37,10 +38,14 @@ USERS_FILE = "users.json"
 
 DEFAULT_MARGIN = 5.0
 DEFAULT_LEVERAGE = 8
+RATE_LIMIT_SECONDS = 30  # هر کاربر هر ۳۰ ثانیه یک بار
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
+
+# برای Rate Limit
+user_last_request = defaultdict(float)
 
 def load_users():
     try:
@@ -77,6 +82,20 @@ def get_remaining_days(user_id: int) -> int:
     expiry = datetime.fromisoformat(user["expiry"])
     delta = expiry - datetime.now(timezone.utc)
     return max(0, delta.days)
+
+def check_rate_limit(user_id: int) -> bool:
+    """برمی‌گرداند True اگر کاربر اجازه درخواست دارد"""
+    now = time.time()
+    last = user_last_request.get(user_id, 0)
+    if now - last < RATE_LIMIT_SECONDS:
+        return False
+    user_last_request[user_id] = now
+    return True
+
+def is_private_chat(update: Update) -> bool:
+    return update.effective_chat.type == "private"
+
+# ===================== توابع تحلیلی =====================
 
 def fetch_klines(symbol, interval, limit=250):
     url = f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
@@ -203,47 +222,54 @@ def safe_fmt(v, fmt=".4f"):
     except:
         return str(v)
 
+# ===================== دستورات =====================
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_private_chat(update):
+        return
     text = (
         "🤖 **Kronos | دستیار هوشمند معاملاتی**\n\n"
-        "این ربات خصوصی و اشتراکی است.\n\n"
-        "`/buy` → خرید اشتراک ۳۰ روزه (۱۰ USDT)\n"
+        "این ربات خصوصی است.\n\n"
+        "`/buy` → خرید اشتراک\n"
         "`/status` → وضعیت اشتراک\n"
-        "`/predict BTCUSDT` → تحلیل کامل\n"
-        "`/tools` → منابع"
+        "`/predict BTCUSDT` → تحلیل\n"
+        "`/tools`"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
 async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_private_chat(update):
+        return
     text = (
         f"💳 **خرید اشتراک ۳۰ روزه**\n\n"
         f"مبلغ: **{SUBSCRIPTION_PRICE} USDT**\n"
         f"شبکه: **TRC20**\n\n"
-        f"آدرس ولت:\n`{USDT_WALLET}`\n\n"
+        f"آدرس:\n`{USDT_WALLET}`\n\n"
         f"پس از واریز، رسید را برای ادمین ارسال کنید.\n"
-        f"⚠️ فقط شبکه TRC20"
+        f"⚠️ فقط TRC20"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_private_chat(update):
+        return
     user_id = update.effective_user.id
     if is_subscribed(user_id):
         days = get_remaining_days(user_id)
         await update.message.reply_text(f"✅ اشتراک فعال\nروزهای باقی‌مانده: **{days} روز**", parse_mode="Markdown")
     else:
-        await update.message.reply_text("❌ اشتراک فعال ندارید.\nاز /buy استفاده کنید.")
+        await update.message.reply_text("❌ اشتراک فعال ندارید.")
 
 async def tools_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🛠 منابع:\nCoinglass • Arkham • Lookonchain • TradingView • DexScreener • CryptoPanic",
-        parse_mode="Markdown"
-    )
+    if not is_private_chat(update):
+        return
+    await update.message.reply_text("Coinglass • Arkham • Lookonchain • TradingView • DexScreener")
 
 async def adduser(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
+    if not is_private_chat(update) or not is_admin(update.effective_user.id):
         return
     if len(context.args) < 1:
-        await update.message.reply_text("فرمت: /adduser <user_id>")
+        await update.message.reply_text("فرمت: /adduser user_id")
         return
     try:
         uid = str(int(context.args[0]))
@@ -257,7 +283,7 @@ async def adduser(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"خطا: {e}")
 
 async def removeuser(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
+    if not is_private_chat(update) or not is_admin(update.effective_user.id):
         return
     if not context.args:
         return
@@ -269,19 +295,28 @@ async def removeuser(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"کاربر {uid} حذف شد.")
 
 async def listusers(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
+    if not is_private_chat(update) or not is_admin(update.effective_user.id):
         return
     users = load_users()
     if not users:
-        await update.message.reply_text("هیچ کاربر فعالی نیست.")
+        await update.message.reply_text("لیست خالی است.")
         return
     lines = [f"`{uid}` → {get_remaining_days(int(uid))} روز" for uid in users]
-    await update.message.reply_text("کاربران فعال:\n" + "\n".join(lines), parse_mode="Markdown")
+    await update.message.reply_text("کاربران:\n" + "\n".join(lines), parse_mode="Markdown")
 
 async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_private_chat(update):
+        return
+
     user_id = update.effective_user.id
+
+    # Rate Limit
+    if not check_rate_limit(user_id):
+        await update.message.reply_text("⏳ لطفاً ۳۰ ثانیه صبر کنید.")
+        return
+
     if not is_subscribed(user_id) and not is_admin(user_id):
-        await update.message.reply_text("❌ اشتراک فعال ندارید.\nاز /buy استفاده کنید.")
+        await update.message.reply_text("❌ دسترسی ندارید.")
         return
 
     args = context.args
@@ -386,14 +421,9 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buf.seek(0)
         plt.close('all')
 
-        # ===== پیام ۱ (خط به خط) =====
         base_symbol = symbol.replace("USDT", "")
         coinglass_url = f"https://www.coinglass.com/currencies/{base_symbol}/funding-rate"
-
-        if funding is not None:
-            funding_line = f"`{safe_fmt(funding, '.4f')}%`"
-        else:
-            funding_line = f"[مشاهده در Coinglass]({coinglass_url})"
+        funding_line = f"`{safe_fmt(funding, '.4f')}%`" if funding is not None else f"[Coinglass]({coinglass_url})"
 
         cap1 = (
             f"🎯 **{symbol}**\n\n"
@@ -406,52 +436,47 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await update.message.reply_photo(photo=buf, caption=cap1, parse_mode="Markdown")
 
-        # ===== پیام ۲ (تحلیل تشریحی کامل) =====
-        # توضیح موقعیت قیمت نسبت به ابزارها
         price_vs_sma = "بالای" if price > sma50 else "زیر"
         price_vs_tenkan = "بالای" if price > tenkan else "زیر"
         price_vs_kijun = "بالای" if price > kijun else "زیر"
 
         analysis_text = (
             f"🧬 **تحلیل تشریحی {symbol}**\n\n"
-            f"**ساختار NDS (اولویت اصلی):**\n"
+            f"**ساختار NDS:**\n"
             f"• روزانه: {nds_d['cycle']} → **{nds_d['bias']}**\n"
             f"• ۴ ساعته: {nds_4h['cycle']} → **{nds_4h['bias']}**\n"
             f"• ۱۵ دقیقه: {nds_15['cycle']} → **{nds_15['bias']}**\n"
-            f"بایاس غالب از تایم‌فریم بالاتر: **{higher_bias}**\n\n"
-            f"**وضعیت اندیکاتورها (۱ ساعته):**\n"
-            f"• RSI(14): `{rsi:.1f}`\n"
-            f"• ATR(14): `{atr:.2f}`\n"
-            f"• قیمت نسبت به SMA50: {price_vs_sma} SMA50 (`{sma50:.2f}`)\n"
-            f"• قیمت نسبت به Tenkan: {price_vs_tenkan} Tenkan (`{tenkan:.2f}`)\n"
-            f"• قیمت نسبت به Kijun: {price_vs_kijun} Kijun (`{kijun:.2f}`)\n\n"
-            f"**مدیریت ریسک:**\n"
-            f"• مارجین: `${margin}`\n"
-            f"• اهرم: `{lev}x Isolated`\n"
-            f"• حجم پوزیشن: `${margin * lev:.1f}`\n"
-            f"• ریسک این ستاپ: `${risk_usd:.2f}`"
+            f"بایاس غالب: **{higher_bias}**\n\n"
+            f"**اندیکاتورها:**\n"
+            f"• RSI: `{rsi:.1f}`\n"
+            f"• ATR: `{atr:.2f}`\n"
+            f"• قیمت نسبت به SMA50: {price_vs_sma} (`{sma50:.2f}`)\n"
+            f"• قیمت نسبت به Tenkan: {price_vs_tenkan} (`{tenkan:.2f}`)\n"
+            f"• قیمت نسبت به Kijun: {price_vs_kijun} (`{kijun:.2f}`)\n\n"
+            f"**ریسک:**\n"
+            f"• مارجین: `${margin}` | اهرم: `{lev}x`\n"
+            f"• ریسک ستاپ: `${risk_usd:.2f}`"
         )
         await update.message.reply_text(analysis_text, parse_mode="Markdown")
 
-        # ===== پیام ۳ =====
         await update.message.reply_text(
-            "🛡 **جمع‌بندی**\n"
-            "اولویت تصمیم‌گیری با ساختار NDS تایم‌فریم بالاتر است.\n"
-            "در صورت عدم هم‌راستایی بین تایم‌فریم‌ها، صبر منطقی‌ترین انتخاب است.",
+            "🛡 اولویت با ساختار NDS تایم‌فریم بالاتر است.\nدر صورت عدم هم‌راستایی، صبر منطقی است.",
             parse_mode="Markdown"
         )
 
         await status_msg.delete()
 
     except Exception as e:
-        await status_msg.edit_text(f"❌ خطا:\n`{str(e)}`")
+        await status_msg.edit_text("❌ خطا در پردازش.")
 
 def main():
     if not BOT_TOKEN:
         print("BOT_TOKEN تنظیم نشده!")
         return
+
     t = threading.Thread(target=run_web, daemon=True)
     t.start()
+
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("buy", buy))
@@ -461,7 +486,8 @@ def main():
     app.add_handler(CommandHandler("adduser", adduser))
     app.add_handler(CommandHandler("removeuser", removeuser))
     app.add_handler(CommandHandler("listusers", listusers))
-    print("Kronos آماده است...")
+
+    print("Kronos با امنیت بالاتر آماده است...")
     app.run_polling()
 
 if __name__ == '__main__':
