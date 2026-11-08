@@ -113,6 +113,24 @@ def get_funding(symbol):
         pass
     return None, None, None
 
+def get_crypto_news(limit=5):
+    """دریافت اخبار از CryptoCompare (منبع رایگان و نسبتاً پایدار)"""
+    try:
+        url = "https://min-api.cryptocompare.com/data/v2/news/?lang=EN&categories=BTC,ETH,Market,Trading,Blockchain"
+        r = requests.get(url, headers=HEADERS, timeout=10)
+        if r.status_code == 200:
+            data = r.json().get("Data", [])
+            news = []
+            for item in data[:limit]:
+                title = item.get("title", "").strip()
+                source = item.get("source", "Unknown")
+                if title:
+                    news.append(f"• {title}\n  _{source}_")
+            return news if news else ["خبر جدیدی در دسترس نیست."]
+    except Exception as e:
+        print("News error:", e)
+    return ["در حال حاضر امکان دریافت اخبار وجود ندارد."]
+
 def safe_rsi(s, p=14):
     d = s.diff()
     g = d.where(d > 0, 0).rolling(p).mean()
@@ -182,7 +200,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🤖 **Kronos | دستیار جامع ترید**\n\n"
         "نقش‌ها: مدیر ریسک + وکیل مدافع + مربی ژورنال\n\n"
-        "`/predict` یا `/predict BTCUSDT`\n"
+        "`/predict`  `/news`\n"
         "`/buy`  `/status`\n"
         "`/log`  `/performance`\n"
         "`/tools`",
@@ -223,6 +241,21 @@ async def tools(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• [Tokenomist](https://tokenomist.ai)"
     )
     await update.message.reply_text(text, parse_mode="Markdown", disable_web_page_preview=True)
+
+async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_private(update): return
+    uid = update.effective_user.id
+    if not is_subscribed(uid) and not is_admin(uid):
+        await update.message.reply_text("❌ دسترسی ندارید.")
+        return
+
+    msg = await update.message.reply_text("⏳ در حال دریافت آخرین اخبار...")
+    try:
+        news_list = get_crypto_news(limit=6)
+        text = "📰 **آخرین اخبار بازار**\n\n" + "\n\n".join(news_list)
+        await msg.edit_text(text, parse_mode="Markdown")
+    except Exception as e:
+        await msg.edit_text("❌ خطا در دریافت اخبار.")
 
 async def adduser(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_private(update) or not is_admin(update.effective_user.id): return
@@ -317,7 +350,7 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         margin, lev = DEFAULT_MARGIN, DEFAULT_LEVERAGE
 
-    status = await update.message.reply_text(f"⏳ تحلیل عمیق `{symbol}` ...")
+    status = await update.message.reply_text(f"⏳ تحلیل `{symbol}` ...")
 
     try:
         df_1h = fetch_klines(symbol, "1h", 250)
@@ -337,8 +370,6 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sma200 = float(df_1h['close'].rolling(200).mean().iloc[-1]) if len(df_1h)>=200 else sma50
         tenkan = float(df_1h['tenkan'].iloc[-1])
         kijun = float(df_1h['kijun'].iloc[-1])
-        senkou_a = float(df_1h['senkou_a'].iloc[-1]) if not pd.isna(df_1h['senkou_a'].iloc[-1]) else price
-        senkou_b = float(df_1h['senkou_b'].iloc[-1]) if not pd.isna(df_1h['senkou_b'].iloc[-1]) else price
 
         funding, next_f, mark = get_funding(symbol)
         nds_d = analyze_nds(df_1d)
@@ -351,66 +382,36 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sims = np.array([price * np.exp(np.cumsum(np.random.normal(mu, sigma, 24))) for _ in range(60)])
         mean_path = np.mean(sims, axis=0)
 
-        # سیگنال
         if higher=="صعودی" and mean_path[-1]>price and rsi<65:
             signal, entry, sl, tp = "🟢 LONG", price, price-atr*1.55, price+atr*2.4
-            reason = "NDS بالاتر صعودی + هم‌راستایی ابزارها"
+            reason = "NDS بالاتر صعودی + هم‌راستایی"
         elif higher=="نزولی" and mean_path[-1]<price and rsi>35:
             signal, entry, sl, tp = "🔴 SHORT", price, price+atr*1.55, price-atr*2.4
-            reason = "NDS بالاتر نزولی + هم‌راستایی ابزارها"
+            reason = "NDS بالاتر نزولی + هم‌راستایی"
         else:
             signal, entry, sl, tp = "⚪️ صبر", price, price-atr*1.25, price+atr*1.25
-            reason = "عدم تأیید کافی از ساختار NDS بالاتر"
+            reason = "عدم تأیید کافی NDS بالاتر"
 
         risk = abs(entry-sl)*(margin*lev/entry)
 
-        # ---------- تحلیل عمیق‌تر ----------
-        # ایچیموکو
-        if price > max(senkou_a, senkou_b):
-            ichi_pos = "بالای ابر (حمایت نسبی)"
-        elif price < min(senkou_a, senkou_b):
-            ichi_pos = "زیر ابر (مقاومت نسبی)"
-        else:
-            ichi_pos = "داخل ابر (وضعیت خنثی و پرنوسان)"
-
-        tk_relation = "تنکان بالای کیجون (نشانه صعودی کوتاه‌مدت)" if tenkan > kijun else "تنکان زیر کیجون (نشانه نزولی کوتاه‌مدت)"
-
-        # میانگین‌ها
-        if sma20 > sma50 > sma200:
-            ma_align = "هم‌راستایی صعودی کامل (۲۰ > ۵۰ > ۲۰۰)"
-        elif sma20 < sma50 < sma200:
-            ma_align = "هم‌راستایی نزولی کامل (۲۰ < ۵۰ < ۲۰۰)"
-        else:
-            ma_align = "عدم هم‌راستایی میانگین‌ها (بازار در حال تصمیم‌گیری)"
-
-        # فیبوناچی
-        fibs = calc_fib(df_1h)
-        nearest_fib = min(fibs.items(), key=lambda x: abs(x[1]-price))
-        fib_comment = f"نزدیک‌ترین سطح فیبوناچی: {nearest_fib[0]} در حدود `{nearest_fib[1]:.1f}`"
-
-        # نمودار
-        plot_df = df_1h.tail(110).copy()
-        fig, ax = plt.subplots(figsize=(12.2, 6.6))
+        # نمودار ساده و تمیز
+        plot_df = df_1h.tail(100).copy()
+        fig, ax = plt.subplots(figsize=(12, 6.3))
         ax.plot(plot_df['close'].values, color='#1f77b4', lw=1.7, label='قیمت')
         ax.plot(plot_df['close'].rolling(20).mean().values, color='#9467bd', lw=1.1, label='SMA20', alpha=0.9)
         ax.plot(plot_df['close'].rolling(50).mean().values, color='#ff7f0e', lw=1.3, label='SMA50')
         ax.plot(plot_df['tenkan'].values, color='#2ca02c', lw=1.0, label='Tenkan', alpha=0.85)
         ax.plot(plot_df['kijun'].values, color='#d62728', lw=1.0, label='Kijun', alpha=0.85)
-        for k,v in fibs.items():
-            ax.axhline(v, color='gray', ls='--', lw=0.75, alpha=0.7)
-            ax.text(len(plot_df)+1.5, v, f'{k}', fontsize=7, color='#555')
         last = len(plot_df)-1
-        for s in sims[::4]:
-            ax.plot(range(last, last+24), s, color='gray', alpha=0.11)
-        ax.plot(range(last, last+24), mean_path, color='#c0392b', lw=2.0, label='پیش‌بینی ۲۴h')
+        for s in sims[::5]:
+            ax.plot(range(last, last+24), s, color='gray', alpha=0.10)
+        ax.plot(range(last, last+24), mean_path, color='#c0392b', lw=2.0, label='پیش‌بینی')
         ax.yaxis.tick_right()
-        ax.yaxis.set_major_locator(MaxNLocator(nbins=11))
-        ax.set_title(f"Kronos | {symbol} | NDS: {higher}")
+        ax.set_title(f"Kronos | {symbol} | {higher}")
         ax.legend(loc='upper left', fontsize=8)
         ax.grid(True, alpha=0.3)
-        ax.set_xlim(0, len(plot_df)+28)
         buf = io.BytesIO()
-        plt.savefig(buf, format='png', bbox_inches='tight', dpi=135)
+        plt.savefig(buf, format='png', bbox_inches='tight', dpi=130)
         buf.seek(0)
         plt.close()
 
@@ -418,7 +419,6 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         glass = f"https://www.coinglass.com/currencies/{base}/funding-rate"
         fund_line = f"`{safe_fmt(funding,'.4f')}%`" if funding is not None else f"[Coinglass]({glass})"
 
-        # پیام ۱
         cap = (
             f"🎯 **{symbol}**\n\n"
             f"سیگنال: **{signal}**\n"
@@ -430,40 +430,22 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await update.message.reply_photo(photo=buf, caption=cap, parse_mode="Markdown")
 
-        # پیام ۲ - تحلیل عمیق
         text2 = (
             f"📌 **مدیر ریسک**\n"
             f"مارجین: `${margin}` | اهرم: `{lev}x`\n"
-            f"حجم پوزیشن: `${margin*lev:.1f}`\n"
-            f"ریسک این ستاپ: `${risk:.2f}`\n\n"
-            f"🧬 **وکیل مدافع (تحلیل عمیق)**\n\n"
-            f"**ساختار NDS**\n"
-            f"• روزانه: {nds_d['cycle']} → **{nds_d['bias']}**\n"
-            f"• ۴ ساعته: {nds_4h['cycle']} → **{nds_4h['bias']}**\n"
-            f"• ۱۵ دقیقه: {nds_15['cycle']} → **{nds_15['bias']}**\n"
-            f"بایاس غالب: **{higher}**\n\n"
-            f"**ایچیموکو**\n"
-            f"• موقعیت قیمت: {ichi_pos}\n"
-            f"• رابطه تنکان/کیجون: {tk_relation}\n\n"
-            f"**میانگین‌های متحرک**\n"
-            f"• SMA20: `{sma20:.1f}`\n"
-            f"• SMA50: `{sma50:.1f}`\n"
-            f"• SMA200: `{sma200:.1f}`\n"
-            f"• وضعیت: {ma_align}\n\n"
-            f"**فیبوناچی و نوسان**\n"
-            f"• {fib_comment}\n"
-            f"• ATR: `{atr:.2f}` | RSI: `{rsi:.1f}`\n\n"
-            f"**سناریوها**\n"
-            f"• صعودی: حفظ ساختار HH+HL + شکست مقاومت‌های پیش‌رو\n"
-            f"• نزولی: ادامه LH+LL + از دست رفتن حمایت‌های کلیدی\n"
-            f"• رنج: ماندن قیمت بین سطوح مهم تا زمان شکست معتبر"
+            f"حجم: `${margin*lev:.1f}` | ریسک: `${risk:.2f}`\n\n"
+            f"🧬 **NDS و وکیل مدافع**\n"
+            f"بایاس غالب: **{higher}**\n"
+            f"• روزانه: {nds_d['cycle']} → {nds_d['bias']}\n"
+            f"• ۴ ساعته: {nds_4h['cycle']} → {nds_4h['bias']}\n"
+            f"• ۱۵ دقیقه: {nds_15['cycle']} → {nds_15['bias']}\n\n"
+            f"RSI: `{rsi:.1f}` | ATR: `{atr:.2f}`\n"
+            f"SMA20: `{sma20:.1f}` | SMA50: `{sma50:.1f}` | SMA200: `{sma200:.1f}`"
         )
         await update.message.reply_text(text2, parse_mode="Markdown")
 
         await update.message.reply_text(
-            "🛡 **جمع‌بندی نهایی**\n"
-            "اولویت تصمیم‌گیری همیشه با ساختار NDS تایم‌فریم بالاتر است.\n"
-            "در صورت تناقض بین ابزارها، صبر منطقی‌ترین انتخاب است.",
+            "🛡 اولویت با ساختار NDS تایم‌فریم بالاتر است.\nدر صورت تناقض، صبر توصیه می‌شود.",
             parse_mode="Markdown"
         )
         await status.delete()
@@ -482,6 +464,7 @@ def main():
     app.add_handler(CommandHandler("buy", buy))
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("tools", tools))
+    app.add_handler(CommandHandler("news", news_command))
     app.add_handler(CommandHandler("predict", predict_command))
     app.add_handler(CommandHandler("log", log_trade))
     app.add_handler(CommandHandler("performance", performance))
