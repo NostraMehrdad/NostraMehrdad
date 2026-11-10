@@ -3,7 +3,7 @@ import json
 import threading
 import io
 import time
-import ccxt
+import requests
 import pandas as pd
 import numpy as np
 from datetime import datetime, timezone, timedelta
@@ -18,11 +18,18 @@ from flask import Flask
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
+# تلاش برای ایمپورت CCXT (اختیاری)
+try:
+    import ccxt
+    CCXT_AVAILABLE = True
+except:
+    CCXT_AVAILABLE = False
+
 app_web = Flask(__name__)
 
 @app_web.route('/')
 def home():
-    return "Kronos Professional (CCXT) is active"
+    return "Kronos Professional is active"
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -42,13 +49,22 @@ DEFAULT_LEVERAGE = 8
 RISK_PER_TRADE = 0.8
 RATE_LIMIT_SECONDS = 35
 
-# ---------- CCXT Exchange ----------
-exchange = ccxt.binance({
-    'enableRateLimit': True,
-    'options': {'defaultType': 'future'}
-})
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+}
 
 user_last_request = defaultdict(float)
+
+# CCXT exchange (اگر در دسترس باشد)
+exchange = None
+if CCXT_AVAILABLE:
+    try:
+        exchange = ccxt.binance({
+            'enableRateLimit': True,
+            'options': {'defaultType': 'future'}
+        })
+    except:
+        exchange = None
 
 def load_json(path):
     try:
@@ -89,26 +105,58 @@ def check_rate(uid):
 
 def is_private(update): return update.effective_chat.type == "private"
 
-def fetch_ohlcv(symbol, timeframe='1h', limit=250):
+def fetch_klines_binance(symbol, interval, limit=250):
+    """روش پایدار مستقیم"""
+    url = f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
     try:
-        # CCXT expects BTC/USDT format
-        market_symbol = symbol.replace("USDT", "/USDT")
-        ohlcv = exchange.fetch_ohlcv(market_symbol, timeframe=timeframe, limit=limit)
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        return df
-    except Exception as e:
-        print("CCXT fetch error:", e)
-        return None
+        r = requests.get(url, headers=HEADERS, timeout=12)
+        if r.status_code == 200:
+            df = pd.DataFrame(r.json(), columns=[
+                'open_time','open','high','low','close','volume',
+                'close_time','qav','num_trades','taker_base','taker_quote','ignore'
+            ])
+            for c in ['open','high','low','close','volume']:
+                df[c] = df[c].astype(float)
+            return df
+    except:
+        pass
+    return None
+
+def fetch_ohlcv(symbol, timeframe='1h', limit=250):
+    """اول CCXT، اگر نشد روش مستقیم"""
+    # روش ۱: CCXT
+    if exchange:
+        try:
+            market_symbol = symbol.replace("USDT", "/USDT")
+            ohlcv = exchange.fetch_ohlcv(market_symbol, timeframe=timeframe, limit=limit)
+            df = pd.DataFrame(ohlcv, columns=['timestamp','open','high','low','close','volume'])
+            return df
+        except Exception as e:
+            print("CCXT failed:", e)
+
+    # روش ۲: مستقیم بایننس
+    interval_map = {'1h':'1h', '15m':'15m', '4h':'4h', '1d':'1d'}
+    return fetch_klines_binance(symbol, interval_map.get(timeframe, '1h'), limit)
 
 def get_funding_rate(symbol):
+    # اول CCXT
+    if exchange:
+        try:
+            market_symbol = symbol.replace("USDT", "/USDT")
+            funding = exchange.fetch_funding_rate(market_symbol)
+            return float(funding.get('fundingRate', 0)) * 100
+        except:
+            pass
+
+    # روش مستقیم
     try:
-        market_symbol = symbol.replace("USDT", "/USDT")
-        funding = exchange.fetch_funding_rate(market_symbol)
-        rate = float(funding.get('fundingRate', 0)) * 100
-        return rate
+        url = f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={symbol}"
+        r = requests.get(url, headers=HEADERS, timeout=8)
+        if r.status_code == 200:
+            return float(r.json().get('lastFundingRate', 0)) * 100
     except:
-        return None
+        pass
+    return None
 
 def safe_rsi(series, period=14):
     delta = series.diff()
@@ -137,8 +185,8 @@ def calc_fib(df, lookback=90):
     l = df['low'].tail(lookback).min()
     d = h - l
     return {
-        '0.0': h, '0.236': h - d*0.236, '0.382': h - d*0.382,
-        '0.5': h - d*0.5, '0.618': h - d*0.618, '0.786': h - d*0.786, '1.0': l
+        '0.0': h, '0.236': h-d*0.236, '0.382': h-d*0.382,
+        '0.5': h-d*0.5, '0.618': h-d*0.618, '0.786': h-d*0.786, '1.0': l
     }
 
 def find_nodes(df, mult=1.1, lb=4):
@@ -187,7 +235,6 @@ def calculate_dollar_sl_tp(entry, direction, atr, margin=5.0, leverage=8, risk_d
     else:
         sl = entry + final_distance
         tp = entry - final_distance * 2.2
-
     return round(sl, 4), round(tp, 4)
 
 # ===================== دستورات =====================
@@ -195,7 +242,7 @@ def calculate_dollar_sl_tp(entry, direction, atr, margin=5.0, leverage=8, risk_d
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_private(update): return
     await update.message.reply_text(
-        "🤖 **Kronos | دستیار جامع ترید (CCXT)**\n\n"
+        "🤖 **Kronos | دستیار جامع ترید**\n\n"
         "`/predict`  `/news`\n"
         "`/buy`  `/status`\n"
         "`/log`  `/performance`\n"
@@ -223,10 +270,17 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def tools(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_private(update): return
     text = (
-        "🛠 **منابع**\n"
-        "• Coinglass\n• Arkham\n• Lookonchain\n• DexScreener\n• Birdeye\n• DefiLlama\n• CryptoQuant"
+        "🛠 **منابع معتبر**\n\n"
+        "• [Coinglass](https://www.coinglass.com)\n"
+        "• [Arkham](https://www.arkham.com)\n"
+        "• [Lookonchain](https://www.lookonchain.com)\n"
+        "• [DexScreener](https://dexscreener.com)\n"
+        "• [Birdeye](https://birdeye.so)\n"
+        "• [DefiLlama](https://defillama.com)\n"
+        "• [CryptoQuant](https://cryptoquant.com)\n"
+        "• [GMGN](https://gmgn.ai)"
     )
-    await update.message.reply_text(text)
+    await update.message.reply_text(text, parse_mode="Markdown", disable_web_page_preview=True)
 
 async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_private(update): return
@@ -234,16 +288,16 @@ async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_subscribed(uid) and not is_admin(uid):
         await update.message.reply_text("❌ دسترسی ندارید.")
         return
-    await update.message.reply_text("📰 دریافت اخبار از منابع خارجی فعلاً محدود است.\nپیشنهاد: Coinglass + CryptoPanic")
+    await update.message.reply_text("📰 فعلاً دریافت خودکار اخبار محدود است.\nپیشنهاد: Coinglass + CryptoPanic")
 
 async def adduser(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_private(update) or not is_admin(update.effective_user.id): return
     if not context.args: return
     try:
         uid = str(int(context.args[0]))
-        days = int(context.args[1]) if len(context.args) > 1 else SUBSCRIPTION_DAYS
+        days = int(context.args[1]) if len(context.args)>1 else SUBSCRIPTION_DAYS
         users = load_json(USERS_FILE)
-        users[uid] = {"expiry": (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()}
+        users[uid] = {"expiry": (datetime.now(timezone.utc)+timedelta(days=days)).isoformat()}
         save_json(USERS_FILE, users)
         await update.message.reply_text(f"✅ {uid} برای {days} روز فعال شد.")
     except Exception as e:
@@ -282,7 +336,7 @@ async def log_trade(update: Update, context: ContextTypes.DEFAULT_TYPE):
         direction = context.args[1].upper()
         entry = float(context.args[2])
         exit_p = float(context.args[3])
-        pnl = float(context.args[4]) if len(context.args) > 4 else 0.0
+        pnl = float(context.args[4]) if len(context.args)>4 else 0.0
         journal = load_json(JOURNAL_FILE)
         trades = journal.get(str(uid), [])
         trades.append({
@@ -312,16 +366,12 @@ async def performance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total = len(trades)
     pnls = [t.get("pnl", 0) for t in trades]
     wins = [p for p in pnls if p > 0]
-    losses = [p for p in pnls if p < 0]
     winrate = (len(wins)/total*100) if total else 0
     total_pnl = sum(pnls)
-    text = (
-        f"📊 **عملکرد**\n"
-        f"تعداد: `{total}`\n"
-        f"وین‌ریت: `{winrate:.1f}%`\n"
-        f"مجموع PnL: `{total_pnl:.2f}`"
+    await update.message.reply_text(
+        f"📊 **عملکرد**\nتعداد: `{total}`\nوین‌ریت: `{winrate:.1f}%`\nمجموع PnL: `{total_pnl:.2f}`",
+        parse_mode="Markdown"
     )
-    await update.message.reply_text(text, parse_mode="Markdown")
 
 async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_private(update): return
@@ -336,12 +386,12 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     symbol = args[0].upper() if args else "BTCUSDT"
     try:
-        margin = float(args[1]) if len(args) > 1 else DEFAULT_MARGIN
-        lev = float(args[2]) if len(args) > 2 else DEFAULT_LEVERAGE
+        margin = float(args[1]) if len(args)>1 else DEFAULT_MARGIN
+        lev = float(args[2]) if len(args)>2 else DEFAULT_LEVERAGE
     except:
         margin, lev = DEFAULT_MARGIN, DEFAULT_LEVERAGE
 
-    status = await update.message.reply_text(f"⏳ تحلیل با CCXT | `{symbol}` ...")
+    status = await update.message.reply_text(f"⏳ تحلیل `{symbol}` ...")
 
     try:
         df_1h = fetch_ohlcv(symbol, '1h', 250)
@@ -350,7 +400,7 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         df_1d = fetch_ohlcv(symbol, '1d', 120)
 
         if df_1h is None or len(df_1h) < 60:
-            await status.edit_text("❌ خطا در دریافت داده از CCXT.")
+            await status.edit_text("❌ خطا در دریافت داده.")
             return
 
         df_1h = add_ichimoku(df_1h)
@@ -369,25 +419,24 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         nds_15 = analyze_nds(df_15m)
         higher = nds_d['bias'] if nds_d['bias'] != "خنثی" else nds_4h['bias']
 
-        # مونت‌کارلو
         rets = np.diff(np.log(df_1h['close'].values))
         mu, sigma = np.mean(rets), np.std(rets)
         sims = np.array([price * np.exp(np.cumsum(np.random.normal(mu, sigma, 24))) for _ in range(60)])
         mean_path = np.mean(sims, axis=0)
 
-        # تصمیم‌گیری
+        # تصمیم
         if higher == "صعودی" and mean_path[-1] > price and rsi < 68:
             direction = "LONG"
             signal = "🟢 LONG"
-            reason = "ساختار NDS تایم‌فریم بالاتر صعودی است و با مونت‌کارلو و RSI هم‌راستا شده."
+            reason = "ساختار NDS بالاتر صعودی + تأیید مونت‌کارلو و RSI"
         elif higher == "نزولی" and mean_path[-1] < price and rsi > 32:
             direction = "SHORT"
             signal = "🔴 SHORT"
-            reason = "ساختار NDS تایم‌فریم بالاتر نزولی است و با مونت‌کارلو و RSI هم‌راستا شده."
+            reason = "ساختار NDS بالاتر نزولی + تأیید مونت‌کارلو و RSI"
         else:
             direction = None
             signal = "⚪️ صبر"
-            reason = "عدم تأیید کافی از ساختار NDS تایم‌فریم‌های بالاتر."
+            reason = "عدم تأیید کافی از ساختار NDS تایم‌فریم‌های بالاتر"
 
         if direction:
             sl, tp = calculate_dollar_sl_tp(price, direction, atr, margin, lev, RISK_PER_TRADE)
@@ -401,14 +450,13 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         risk_usd = abs(entry - sl) / entry * position_size
         reward_usd = abs(tp - entry) / entry * position_size
 
-        # نزدیک‌ترین حمایت و مقاومت از فیبوناچی
         fibs = calc_fib(df_1h)
         nearest_res = min([v for v in fibs.values() if v > price], default=None)
         nearest_sup = max([v for v in fibs.values() if v < price], default=None)
 
         # نمودار
         plot_df = df_1h.tail(100).copy()
-        fig, ax = plt.subplots(figsize=(12.3, 6.6))
+        fig, ax = plt.subplots(figsize=(12.2, 6.5))
         ax.plot(plot_df['close'].values, color='#1f77b4', lw=1.7, label='قیمت')
         ax.plot(plot_df['close'].rolling(20).mean().values, color='#9467bd', lw=1.1, label='SMA20')
         ax.plot(plot_df['close'].rolling(50).mean().values, color='#ff7f0e', lw=1.3, label='SMA50')
@@ -419,7 +467,7 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ax.plot(range(last, last+24), s, color='gray', alpha=0.12)
         ax.plot(range(last, last+24), mean_path, color='#c0392b', lw=2.0, label='پیش‌بینی')
         ax.yaxis.tick_right()
-        ax.set_title(f"Kronos CCXT | {symbol} | {higher}")
+        ax.set_title(f"Kronos | {symbol} | {higher}")
         ax.legend(loc='upper left', fontsize=8)
         ax.grid(True, alpha=0.3)
         buf = io.BytesIO()
@@ -429,9 +477,9 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         fund_text = f"`{funding:.4f}%`" if funding is not None else "نامشخص"
 
-        # ----- پیام ۱: سیگنال مجزا -----
+        # پیام ۱ - سیگنال مجزا
         cap = (
-            f"🎯 **سیگنال نهایی | {symbol}**\n\n"
+            f"🎯 **سیگنال | {symbol}**\n\n"
             f"سیگنال: **{signal}**\n"
             f"ورود: `{entry:.2f}`\n"
             f"حد ضرر: `{sl:.2f}`\n"
@@ -442,22 +490,24 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await update.message.reply_photo(photo=buf, caption=cap, parse_mode="Markdown")
 
-        # ----- پیام ۲: جزئیات -----
+        # پیام ۲
         text2 = (
             f"📌 **مدیر ریسک**\n"
             f"مارجین: `${margin}` | اهرم: `{lev}x`\n"
             f"حجم پوزیشن: `${position_size:.1f}`\n\n"
-            f"🧬 **تحلیل NDS**\n"
+            f"🧬 **NDS**\n"
             f"بایاس غالب: **{higher}**\n"
             f"• روزانه: {nds_d['cycle']} → {nds_d['bias']}\n"
             f"• ۴ ساعته: {nds_4h['cycle']} → {nds_4h['bias']}\n"
             f"• ۱۵ دقیقه: {nds_15['cycle']} → {nds_15['bias']}\n\n"
             f"**سطوح مهم**\n"
-            f"• نزدیک‌ترین مقاومت: `{nearest_res:.2f}`\n" if nearest_res else ""
-            f"• نزدیک‌ترین حمایت: `{nearest_sup:.2f}`\n" if nearest_sup else ""
-            f"\nRSI: `{rsi:.1f}` | ATR: `{atr:.2f}`\n"
-            f"فاندینگ ریت: {fund_text}"
         )
+        if nearest_res:
+            text2 += f"• مقاومت نزدیک: `{nearest_res:.2f}`\n"
+        if nearest_sup:
+            text2 += f"• حمایت نزدیک: `{nearest_sup:.2f}`\n"
+        text2 += f"\nRSI: `{rsi:.1f}` | ATR: `{atr:.2f}`\nفاندینگ: {fund_text}"
+
         await update.message.reply_text(text2, parse_mode="Markdown")
 
         await update.message.reply_text(
@@ -467,7 +517,7 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status.delete()
 
     except Exception as e:
-        await status.edit_text(f"❌ خطا: {str(e)[:100]}")
+        await status.edit_text("❌ خطا در تحلیل.")
 
 def main():
     if not BOT_TOKEN:
@@ -487,7 +537,7 @@ def main():
     app.add_handler(CommandHandler("adduser", adduser))
     app.add_handler(CommandHandler("removeuser", removeuser))
     app.add_handler(CommandHandler("listusers", listusers))
-    print("Kronos CCXT آماده است")
+    print("Kronos آماده است")
     app.run_polling()
 
 if __name__ == '__main__':
