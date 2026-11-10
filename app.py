@@ -3,7 +3,7 @@ import json
 import threading
 import io
 import time
-import requests
+import ccxt
 import pandas as pd
 import numpy as np
 from datetime import datetime, timezone, timedelta
@@ -22,7 +22,7 @@ app_web = Flask(__name__)
 
 @app_web.route('/')
 def home():
-    return "Kronos Professional is active"
+    return "Kronos Professional (CCXT) is active"
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -37,14 +37,16 @@ SUBSCRIPTION_DAYS = 30
 USERS_FILE = "users.json"
 JOURNAL_FILE = "journal.json"
 
-DEFAULT_MARGIN = 5.0          # دلار
+DEFAULT_MARGIN = 5.0
 DEFAULT_LEVERAGE = 8
-RISK_PER_TRADE = 0.8          # حداکثر ریسک دلاری پیشنهادی از مارجین ۵ دلاری
+RISK_PER_TRADE = 0.8
 RATE_LIMIT_SECONDS = 35
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-}
+# ---------- CCXT Exchange ----------
+exchange = ccxt.binance({
+    'enableRateLimit': True,
+    'options': {'defaultType': 'future'}
+})
 
 user_last_request = defaultdict(float)
 
@@ -87,71 +89,45 @@ def check_rate(uid):
 
 def is_private(update): return update.effective_chat.type == "private"
 
-def fetch_klines(symbol, interval, limit=250):
-    url = f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
+def fetch_ohlcv(symbol, timeframe='1h', limit=250):
     try:
-        r = requests.get(url, headers=HEADERS, timeout=12)
-        if r.status_code == 200:
-            df = pd.DataFrame(r.json(), columns=[
-                'open_time','open','high','low','close','volume',
-                'close_time','qav','num_trades','taker_base','taker_quote','ignore'
-            ])
-            for c in ['open','high','low','close','volume']:
-                df[c] = df[c].astype(float)
-            return df
-    except:
-        pass
-    return None
+        # CCXT expects BTC/USDT format
+        market_symbol = symbol.replace("USDT", "/USDT")
+        ohlcv = exchange.fetch_ohlcv(market_symbol, timeframe=timeframe, limit=limit)
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        return df
+    except Exception as e:
+        print("CCXT fetch error:", e)
+        return None
 
-def get_funding(symbol):
+def get_funding_rate(symbol):
     try:
-        r = requests.get(f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={symbol}", headers=HEADERS, timeout=8)
-        if r.status_code == 200:
-            d = r.json()
-            rate = float(d.get('lastFundingRate', 0)) * 100
-            nxt = datetime.fromtimestamp(int(d.get('nextFundingTime',0))/1000, tz=timezone.utc).strftime('%H:%M UTC')
-            mark = float(d.get('markPrice', 0))
-            return rate, nxt, mark
+        market_symbol = symbol.replace("USDT", "/USDT")
+        funding = exchange.fetch_funding_rate(market_symbol)
+        rate = float(funding.get('fundingRate', 0)) * 100
+        return rate
     except:
-        pass
-    return None, None, None
+        return None
 
-def get_crypto_news(limit=5):
-    try:
-        url = "https://min-api.cryptocompare.com/data/v2/news/?lang=EN"
-        r = requests.get(url, headers=HEADERS, timeout=10)
-        if r.status_code == 200:
-            data = r.json().get("Data", [])
-            news = []
-            for item in data[:limit]:
-                title = item.get("title", "").strip()
-                source = item.get("source", "")
-                if title:
-                    news.append(f"• {title}\n  _{source}_")
-            if news:
-                return news
-    except:
-        pass
-    return ["• دریافت خودکار اخبار فعلاً محدود است."]
-
-def safe_rsi(s, p=14):
-    d = s.diff()
-    g = d.where(d > 0, 0).rolling(p).mean()
-    l = (-d.where(d < 0, 0)).rolling(p).mean()
-    rs = g / l.replace(0, np.nan)
+def safe_rsi(series, period=14):
+    delta = series.diff()
+    gain = delta.where(delta > 0, 0).rolling(period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(period).mean()
+    rs = gain / loss.replace(0, np.nan)
     return (100 - (100 / (1 + rs))).fillna(50)
 
-def calc_atr(df, p=14):
+def calc_atr(df, period=14):
     tr = pd.concat([
-        df['high']-df['low'],
-        (df['high']-df['close'].shift()).abs(),
-        (df['low']-df['close'].shift()).abs()
+        df['high'] - df['low'],
+        (df['high'] - df['close'].shift()).abs(),
+        (df['low'] - df['close'].shift()).abs()
     ], axis=1).max(axis=1)
-    return tr.rolling(p).mean()
+    return tr.rolling(period).mean()
 
 def add_ichimoku(df):
     df['tenkan'] = (df['high'].rolling(9).max() + df['low'].rolling(9).min()) / 2
-    df['kijun']  = (df['high'].rolling(26).max() + df['low'].rolling(26).min()) / 2
+    df['kijun'] = (df['high'].rolling(26).max() + df['low'].rolling(26).min()) / 2
     df['senkou_a'] = ((df['tenkan'] + df['kijun']) / 2).shift(26)
     df['senkou_b'] = ((df['high'].rolling(52).max() + df['low'].rolling(52).min()) / 2).shift(26)
     return df
@@ -161,78 +137,65 @@ def calc_fib(df, lookback=90):
     l = df['low'].tail(lookback).min()
     d = h - l
     return {
-        '0.0': h, '0.236': h-d*0.236, '0.382': h-d*0.382,
-        '0.5': h-d*0.5, '0.618': h-d*0.618, '0.786': h-d*0.786, '1.0': l
+        '0.0': h, '0.236': h - d*0.236, '0.382': h - d*0.382,
+        '0.5': h - d*0.5, '0.618': h - d*0.618, '0.786': h - d*0.786, '1.0': l
     }
 
 def find_nodes(df, mult=1.1, lb=4):
-    if df is None or len(df) < 40: return []
+    if df is None or len(df) < 40:
+        return []
     atr = calc_atr(df).bfill()
     nodes = []
     hs, ls = df['high'].values, df['low'].values
     for i in range(lb, len(df)-lb):
-        if hs[i] == max(hs[i-lb:i+lb+1]) and (hs[i]-min(ls[i-lb:i])) > atr.iloc[i]*mult:
-            nodes.append({'type':'high','price':float(hs[i])})
-        if ls[i] == min(ls[i-lb:i+lb+1]) and (max(hs[i-lb:i])-ls[i]) > atr.iloc[i]*mult:
-            nodes.append({'type':'low','price':float(ls[i])})
+        if hs[i] == max(hs[i-lb:i+lb+1]) and (hs[i] - min(ls[i-lb:i])) > atr.iloc[i]*mult:
+            nodes.append({'type': 'high', 'price': float(hs[i])})
+        if ls[i] == min(ls[i-lb:i+lb+1]) and (max(hs[i-lb:i]) - ls[i]) > atr.iloc[i]*mult:
+            nodes.append({'type': 'low', 'price': float(ls[i])})
     return nodes
 
 def analyze_nds(df):
     if df is None or len(df) < 50:
-        return {'bias':'خنثی','cycle':'—','info':'—'}
+        return {'bias': 'خنثی', 'cycle': '—', 'info': '—'}
     nodes = find_nodes(df)
     price = float(df['close'].iloc[-1])
     if len(nodes) < 4:
-        return {'bias':'خنثی','cycle':'ناقص','info':'—'}
-    highs = [n['price'] for n in nodes if n['type']=='high']
-    lows  = [n['price'] for n in nodes if n['type']=='low']
+        return {'bias': 'خنثی', 'cycle': 'ناقص', 'info': '—'}
+    highs = [n['price'] for n in nodes if n['type'] == 'high']
+    lows = [n['price'] for n in nodes if n['type'] == 'low']
     lh = highs[-1] if highs else price
-    ph = highs[-2] if len(highs)>1 else lh
+    ph = highs[-2] if len(highs) > 1 else lh
     ll = lows[-1] if lows else price
-    pl = lows[-2] if len(lows)>1 else ll
+    pl = lows[-2] if len(lows) > 1 else ll
     if lh > ph and ll > pl:
         bias, cycle = "صعودی", "HH+HL"
     elif lh < ph and ll < pl:
         bias, cycle = "نزولی", "LH+LL"
     else:
         bias, cycle = "خنثی", "رنج"
-    return {'bias':bias, 'cycle':cycle, 'info':f"{lh:.2f} / {ll:.2f}"}
+    return {'bias': bias, 'cycle': cycle, 'info': f"{lh:.2f} / {ll:.2f}"}
 
 def calculate_dollar_sl_tp(entry, direction, atr, margin=5.0, leverage=8, risk_dollar=0.8):
-    """
-    محاسبه حرفه‌ای حد ضرر و حد سود بر اساس ریسک دلاری
-    """
-    position_size = margin * leverage          # حجم پوزیشن به دلار
-    # فاصله قیمتی که معادل risk_dollar ضرر ایجاد می‌کند
+    position_size = margin * leverage
     price_risk = (risk_dollar / position_size) * entry
-
-    # استفاده از ATR برای واقعی‌تر کردن فاصله
-    atr_distance = atr * 1.4
-
-    # انتخاب بزرگ‌تر بین ریسک دلاری و ATR (محافظه‌کارانه)
+    atr_distance = atr * 1.45
     final_distance = max(price_risk, atr_distance)
 
     if direction == "LONG":
         sl = entry - final_distance
-        tp = entry + final_distance * 2.2      # نسبت ریسک به ریوارد حدود ۱:۲.۲
-    else:  # SHORT
+        tp = entry + final_distance * 2.2
+    else:
         sl = entry + final_distance
         tp = entry - final_distance * 2.2
 
-    return round(sl, 4), round(tp, 4), round(final_distance, 4)
-
-def safe_fmt(v, fmt=".4f"):
-    if v is None: return None
-    try: return format(v, fmt)
-    except: return str(v)
+    return round(sl, 4), round(tp, 4)
 
 # ===================== دستورات =====================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_private(update): return
     await update.message.reply_text(
-        "🤖 **Kronos | دستیار جامع و هوشمند ترید**\n\n"
-        "نقش‌ها: مدیر ریسک + وکیل مدافع + مربی ژورنال\n\n"
+        "🤖 **Kronos | دستیار جامع ترید (CCXT)**\n\n"
         "`/predict`  `/news`\n"
         "`/buy`  `/status`\n"
         "`/log`  `/performance`\n"
@@ -245,8 +208,7 @@ async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"💳 **اشتراک ۳۰ روزه**\n\n"
         f"مبلغ: **{SUBSCRIPTION_PRICE} USDT** (TRC20)\n\n"
-        f"آدرس:\n`{USDT_WALLET}`\n\n"
-        f"پس از واریز، رسید را ارسال کنید.",
+        f"آدرس:\n`{USDT_WALLET}`",
         parse_mode="Markdown"
     )
 
@@ -254,24 +216,17 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_private(update): return
     uid = update.effective_user.id
     if is_subscribed(uid):
-        await update.message.reply_text(f"✅ فعال — **{remaining_days(uid)} روز** باقی‌مانده", parse_mode="Markdown")
+        await update.message.reply_text(f"✅ فعال — **{remaining_days(uid)} روز**", parse_mode="Markdown")
     else:
         await update.message.reply_text("❌ اشتراک فعال نیست.")
 
 async def tools(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_private(update): return
     text = (
-        "🛠 **منابع معتبر**\n\n"
-        "• [Coinglass](https://www.coinglass.com)\n"
-        "• [Arkham](https://www.arkham.com)\n"
-        "• [Lookonchain](https://www.lookonchain.com)\n"
-        "• [DexScreener](https://dexscreener.com)\n"
-        "• [Birdeye](https://birdeye.so)\n"
-        "• [DefiLlama](https://defillama.com)\n"
-        "• [CryptoQuant](https://cryptoquant.com)\n"
-        "• [GMGN](https://gmgn.ai)"
+        "🛠 **منابع**\n"
+        "• Coinglass\n• Arkham\n• Lookonchain\n• DexScreener\n• Birdeye\n• DefiLlama\n• CryptoQuant"
     )
-    await update.message.reply_text(text, parse_mode="Markdown", disable_web_page_preview=True)
+    await update.message.reply_text(text)
 
 async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_private(update): return
@@ -279,22 +234,16 @@ async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_subscribed(uid) and not is_admin(uid):
         await update.message.reply_text("❌ دسترسی ندارید.")
         return
-    msg = await update.message.reply_text("⏳ دریافت اخبار...")
-    try:
-        news_list = get_crypto_news(6)
-        text = "📰 **آخرین اخبار بازار**\n\n" + "\n\n".join(news_list)
-        await msg.edit_text(text, parse_mode="Markdown")
-    except:
-        await msg.edit_text("❌ خطا در دریافت اخبار.")
+    await update.message.reply_text("📰 دریافت اخبار از منابع خارجی فعلاً محدود است.\nپیشنهاد: Coinglass + CryptoPanic")
 
 async def adduser(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_private(update) or not is_admin(update.effective_user.id): return
     if not context.args: return
     try:
         uid = str(int(context.args[0]))
-        days = int(context.args[1]) if len(context.args)>1 else SUBSCRIPTION_DAYS
+        days = int(context.args[1]) if len(context.args) > 1 else SUBSCRIPTION_DAYS
         users = load_json(USERS_FILE)
-        users[uid] = {"expiry": (datetime.now(timezone.utc)+timedelta(days=days)).isoformat()}
+        users[uid] = {"expiry": (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()}
         save_json(USERS_FILE, users)
         await update.message.reply_text(f"✅ {uid} برای {days} روز فعال شد.")
     except Exception as e:
@@ -326,14 +275,14 @@ async def log_trade(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ دسترسی ندارید.")
         return
     if len(context.args) < 4:
-        await update.message.reply_text("`/log نماد جهت ورود خروج [pnl]`\nمثال: `/log BTCUSDT LONG 76000 76500 +40`", parse_mode="Markdown")
+        await update.message.reply_text("`/log نماد جهت ورود خروج [pnl]`")
         return
     try:
         symbol = context.args[0].upper()
         direction = context.args[1].upper()
         entry = float(context.args[2])
         exit_p = float(context.args[3])
-        pnl = float(context.args[4]) if len(context.args)>4 else 0.0
+        pnl = float(context.args[4]) if len(context.args) > 4 else 0.0
         journal = load_json(JOURNAL_FILE)
         trades = journal.get(str(uid), [])
         trades.append({
@@ -346,9 +295,9 @@ async def log_trade(update: Update, context: ContextTypes.DEFAULT_TYPE):
         })
         journal[str(uid)] = trades
         save_json(JOURNAL_FILE, journal)
-        await update.message.reply_text("✅ معامله ثبت شد.")
+        await update.message.reply_text("✅ ثبت شد.")
     except:
-        await update.message.reply_text("فرمت اشتباه است.")
+        await update.message.reply_text("فرمت اشتباه.")
 
 async def performance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_private(update): return
@@ -358,36 +307,19 @@ async def performance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     trades = load_json(JOURNAL_FILE).get(str(uid), [])
     if not trades:
-        await update.message.reply_text("هنوز معامله‌ای ثبت نکرده‌اید.")
+        await update.message.reply_text("معامله‌ای ثبت نشده.")
         return
-
     total = len(trades)
     pnls = [t.get("pnl", 0) for t in trades]
     wins = [p for p in pnls if p > 0]
     losses = [p for p in pnls if p < 0]
-    win_count = len(wins)
-    loss_count = len(losses)
+    winrate = (len(wins)/total*100) if total else 0
     total_pnl = sum(pnls)
-    winrate = (win_count / total * 100) if total > 0 else 0
-    avg_win = (sum(wins)/win_count) if win_count else 0
-    avg_loss = (sum(losses)/loss_count) if loss_count else 0
-    profit_factor = (sum(wins)/abs(sum(losses))) if losses and sum(losses) != 0 else 0
-
-    last_text = ""
-    for t in reversed(trades[-5:]):
-        sign = "+" if t.get("pnl",0) >= 0 else ""
-        last_text += f"`{t['symbol']}` {t['direction']} → {sign}{t.get('pnl',0):.1f}\n"
-
     text = (
-        f"📊 **گزارش عملکرد**\n\n"
-        f"تعداد کل: `{total}`\n"
-        f"سودده: `{win_count}` | زیان‌ده: `{loss_count}`\n"
-        f"وین‌ریت: `{winrate:.1f}%`\n\n"
-        f"مجموع PnL: `{total_pnl:.2f}`\n"
-        f"میانگین سود: `{avg_win:.2f}`\n"
-        f"میانگین ضرر: `{avg_loss:.2f}`\n"
-        f"فاکتور سود: `{profit_factor:.2f}`\n\n"
-        f"**۵ معامله آخر:**\n{last_text}"
+        f"📊 **عملکرد**\n"
+        f"تعداد: `{total}`\n"
+        f"وین‌ریت: `{winrate:.1f}%`\n"
+        f"مجموع PnL: `{total_pnl:.2f}`"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
@@ -404,20 +336,21 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     symbol = args[0].upper() if args else "BTCUSDT"
     try:
-        margin = float(args[1]) if len(args)>1 else DEFAULT_MARGIN
-        lev = float(args[2]) if len(args)>2 else DEFAULT_LEVERAGE
+        margin = float(args[1]) if len(args) > 1 else DEFAULT_MARGIN
+        lev = float(args[2]) if len(args) > 2 else DEFAULT_LEVERAGE
     except:
         margin, lev = DEFAULT_MARGIN, DEFAULT_LEVERAGE
 
-    status = await update.message.reply_text(f"⏳ تحلیل حرفه‌ای `{symbol}` ...")
+    status = await update.message.reply_text(f"⏳ تحلیل با CCXT | `{symbol}` ...")
 
     try:
-        df_1h = fetch_klines(symbol, "1h", 250)
-        df_15m = fetch_klines(symbol, "15m", 180)
-        df_4h = fetch_klines(symbol, "4h", 150)
-        df_1d = fetch_klines(symbol, "1d", 120)
+        df_1h = fetch_ohlcv(symbol, '1h', 250)
+        df_15m = fetch_ohlcv(symbol, '15m', 180)
+        df_4h = fetch_ohlcv(symbol, '4h', 150)
+        df_1d = fetch_ohlcv(symbol, '1d', 120)
+
         if df_1h is None or len(df_1h) < 60:
-            await status.edit_text("❌ داده دریافت نشد.")
+            await status.edit_text("❌ خطا در دریافت داده از CCXT.")
             return
 
         df_1h = add_ichimoku(df_1h)
@@ -430,7 +363,7 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tenkan = float(df_1h['tenkan'].iloc[-1])
         kijun = float(df_1h['kijun'].iloc[-1])
 
-        funding, next_f, mark = get_funding(symbol)
+        funding = get_funding_rate(symbol)
         nds_d = analyze_nds(df_1d)
         nds_4h = analyze_nds(df_4h)
         nds_15 = analyze_nds(df_15m)
@@ -439,137 +372,102 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # مونت‌کارلو
         rets = np.diff(np.log(df_1h['close'].values))
         mu, sigma = np.mean(rets), np.std(rets)
-        sims = np.array([price * np.exp(np.cumsum(np.random.normal(mu, sigma, 24))) for _ in range(70)])
+        sims = np.array([price * np.exp(np.cumsum(np.random.normal(mu, sigma, 24))) for _ in range(60)])
         mean_path = np.mean(sims, axis=0)
 
-        # ========== تصمیم‌گیری حرفه‌ای (اولویت NDS) ==========
-        direction = None
+        # تصمیم‌گیری
         if higher == "صعودی" and mean_path[-1] > price and rsi < 68:
             direction = "LONG"
             signal = "🟢 LONG"
-            reason = "NDS تایم‌فریم بالاتر صعودی + تأیید مونت‌کارلو و RSI"
+            reason = "ساختار NDS تایم‌فریم بالاتر صعودی است و با مونت‌کارلو و RSI هم‌راستا شده."
         elif higher == "نزولی" and mean_path[-1] < price and rsi > 32:
             direction = "SHORT"
             signal = "🔴 SHORT"
-            reason = "NDS تایم‌فریم بالاتر نزولی + تأیید مونت‌کارلو و RSI"
+            reason = "ساختار NDS تایم‌فریم بالاتر نزولی است و با مونت‌کارلو و RSI هم‌راستا شده."
         else:
             direction = None
             signal = "⚪️ صبر"
-            reason = "عدم تأیید کافی ساختار NDS بالاتر"
+            reason = "عدم تأیید کافی از ساختار NDS تایم‌فریم‌های بالاتر."
 
-        # محاسبه حد ضرر و حد سود دلاری حرفه‌ای
         if direction:
-            sl, tp, risk_distance = calculate_dollar_sl_tp(
-                entry=price,
-                direction=direction,
-                atr=atr,
-                margin=margin,
-                leverage=lev,
-                risk_dollar=RISK_PER_TRADE
-            )
+            sl, tp = calculate_dollar_sl_tp(price, direction, atr, margin, lev, RISK_PER_TRADE)
             entry = price
         else:
             entry = price
             sl = price - atr * 1.3
             tp = price + atr * 1.3
-            risk_distance = abs(entry - sl)
 
         position_size = margin * lev
         risk_usd = abs(entry - sl) / entry * position_size
+        reward_usd = abs(tp - entry) / entry * position_size
 
-        # ===================== نمودار کامل =====================
-        plot_df = df_1h.tail(110).copy()
-        fig, ax = plt.subplots(figsize=(12.5, 6.9))
-
-        ax.plot(plot_df['close'].values, color='#1f77b4', lw=1.8, label='قیمت', zorder=5)
-        ax.plot(plot_df['close'].rolling(20).mean().values, color='#9467bd', lw=1.15, label='SMA20', alpha=0.9)
-        ax.plot(plot_df['close'].rolling(50).mean().values, color='#ff7f0e', lw=1.35, label='SMA50')
-        ax.plot(plot_df['tenkan'].values, color='#2ca02c', lw=1.1, label='Tenkan', alpha=0.9)
-        ax.plot(plot_df['kijun'].values, color='#d62728', lw=1.1, label='Kijun', alpha=0.9)
-
-        ax.fill_between(range(len(plot_df)), plot_df['senkou_a'].values, plot_df['senkou_b'].values,
-                        where=plot_df['senkou_a'] >= plot_df['senkou_b'], color='#90ee90', alpha=0.25)
-        ax.fill_between(range(len(plot_df)), plot_df['senkou_a'].values, plot_df['senkou_b'].values,
-                        where=plot_df['senkou_a'] < plot_df['senkou_b'], color='#ffb6c1', alpha=0.25)
-
+        # نزدیک‌ترین حمایت و مقاومت از فیبوناچی
         fibs = calc_fib(df_1h)
-        fib_colors = {
-            '0.0':'#111111', '0.236':'#8B0000', '0.382':'#FF4500',
-            '0.5':'#DAA520', '0.618':'#228B22', '0.786':'#1E90FF', '1.0':'#4B0082'
-        }
-        for k, v in fibs.items():
-            c = fib_colors.get(k, '#555')
-            ax.axhline(v, color=c, ls='--', lw=0.9, alpha=0.85)
-            ax.text(len(plot_df)+1.7, v, f' {k}  {v:.1f}', fontsize=8, va='center', color=c, fontweight='bold')
+        nearest_res = min([v for v in fibs.values() if v > price], default=None)
+        nearest_sup = max([v for v in fibs.values() if v < price], default=None)
 
-        last = len(plot_df)-1
-        for s in sims:
-            ax.plot(range(last, last+24), s, color='gray', alpha=0.13, lw=0.7)
-        ax.plot(range(last, last+24), mean_path, color='#c0392b', lw=2.2, label='پیش‌بینی ۲۴h', zorder=6)
-
+        # نمودار
+        plot_df = df_1h.tail(100).copy()
+        fig, ax = plt.subplots(figsize=(12.3, 6.6))
+        ax.plot(plot_df['close'].values, color='#1f77b4', lw=1.7, label='قیمت')
+        ax.plot(plot_df['close'].rolling(20).mean().values, color='#9467bd', lw=1.1, label='SMA20')
+        ax.plot(plot_df['close'].rolling(50).mean().values, color='#ff7f0e', lw=1.3, label='SMA50')
+        ax.plot(plot_df['tenkan'].values, color='#2ca02c', lw=1.0, label='Tenkan')
+        ax.plot(plot_df['kijun'].values, color='#d62728', lw=1.0, label='Kijun')
+        last = len(plot_df) - 1
+        for s in sims[::4]:
+            ax.plot(range(last, last+24), s, color='gray', alpha=0.12)
+        ax.plot(range(last, last+24), mean_path, color='#c0392b', lw=2.0, label='پیش‌بینی')
         ax.yaxis.tick_right()
-        ax.yaxis.set_label_position("right")
-        ax.yaxis.set_major_locator(MaxNLocator(nbins=13))
-        ax.yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
-        ax.set_ylabel("قیمت")
-        ax.set_title(f"Kronos | {symbol} | NDS: {higher}", fontsize=12)
+        ax.set_title(f"Kronos CCXT | {symbol} | {higher}")
         ax.legend(loc='upper left', fontsize=8)
         ax.grid(True, alpha=0.3)
-        ax.set_xlim(0, len(plot_df)+32)
-
         buf = io.BytesIO()
-        plt.savefig(buf, format='png', bbox_inches='tight', dpi=140)
+        plt.savefig(buf, format='png', bbox_inches='tight', dpi=130)
         buf.seek(0)
         plt.close()
 
-        base = symbol.replace("USDT","")
-        glass = f"https://www.coinglass.com/currencies/{base}/funding-rate"
-        fund_line = f"`{safe_fmt(funding,'.4f')}%`" if funding is not None else f"[Coinglass]({glass})"
+        fund_text = f"`{funding:.4f}%`" if funding is not None else "نامشخص"
 
-        # پیام ۱
+        # ----- پیام ۱: سیگنال مجزا -----
         cap = (
-            f"🎯 **{symbol}**\n\n"
+            f"🎯 **سیگنال نهایی | {symbol}**\n\n"
             f"سیگنال: **{signal}**\n"
             f"ورود: `{entry:.2f}`\n"
             f"حد ضرر: `{sl:.2f}`\n"
-            f"حد سود: `{tp:.2f}`\n"
-            f"دلیل: {reason}\n\n"
-            f"💰 فاندینگ: {fund_line}"
+            f"حد سود: `{tp:.2f}`\n\n"
+            f"💵 ریسک دلاری: `${risk_usd:.2f}`\n"
+            f"💵 سود احتمالی: `${reward_usd:.2f}`\n\n"
+            f"دلیل: {reason}"
         )
         await update.message.reply_photo(photo=buf, caption=cap, parse_mode="Markdown")
 
-        # پیام ۲
+        # ----- پیام ۲: جزئیات -----
         text2 = (
-            f"📌 **مدیر ریسک حرفه‌ای (XT.com)**\n"
-            f"مارجین: `${margin}`\n"
-            f"اهرم: `{lev}x Isolated`\n"
-            f"حجم پوزیشن: `${position_size:.1f}`\n"
-            f"ریسک دلاری این ستاپ: `${risk_usd:.2f}`\n\n"
-            f"🧬 **وکیل مدافع + NDS**\n"
+            f"📌 **مدیر ریسک**\n"
+            f"مارجین: `${margin}` | اهرم: `{lev}x`\n"
+            f"حجم پوزیشن: `${position_size:.1f}`\n\n"
+            f"🧬 **تحلیل NDS**\n"
             f"بایاس غالب: **{higher}**\n"
-            f"• روزانه: {nds_d['cycle']} → **{nds_d['bias']}**\n"
-            f"• ۴ ساعته: {nds_4h['cycle']} → **{nds_4h['bias']}**\n"
-            f"• ۱۵ دقیقه: {nds_15['cycle']} → **{nds_15['bias']}**\n\n"
-            f"**اندیکاتورها**\n"
-            f"• RSI: `{rsi:.1f}` | ATR: `{atr:.2f}`\n"
-            f"• SMA20: `{sma20:.1f}` | SMA50: `{sma50:.1f}` | SMA200: `{sma200:.1f}`\n"
-            f"• Tenkan: `{tenkan:.1f}` | Kijun: `{kijun:.1f}`\n\n"
-            f"**سناریوها**\n"
-            f"• صعودی: حفظ HH+HL و شکست مقاومت\n"
-            f"• نزولی: ادامه LH+LL و از دست رفتن حمایت\n"
-            f"• رنج: نوسان بین سطوح کلیدی"
+            f"• روزانه: {nds_d['cycle']} → {nds_d['bias']}\n"
+            f"• ۴ ساعته: {nds_4h['cycle']} → {nds_4h['bias']}\n"
+            f"• ۱۵ دقیقه: {nds_15['cycle']} → {nds_15['bias']}\n\n"
+            f"**سطوح مهم**\n"
+            f"• نزدیک‌ترین مقاومت: `{nearest_res:.2f}`\n" if nearest_res else ""
+            f"• نزدیک‌ترین حمایت: `{nearest_sup:.2f}`\n" if nearest_sup else ""
+            f"\nRSI: `{rsi:.1f}` | ATR: `{atr:.2f}`\n"
+            f"فاندینگ ریت: {fund_text}"
         )
         await update.message.reply_text(text2, parse_mode="Markdown")
 
         await update.message.reply_text(
-            "🛡 اولویت تصمیم‌گیری همیشه با ساختار NDS تایم‌فریم بالاتر است.\n"
-            "در صورت تناقض، صبر منطقی‌ترین انتخاب است.",
+            "🛡 اولویت با ساختار NDS تایم‌فریم بالاتر است.\nدر صورت تناقض، صبر توصیه می‌شود.",
             parse_mode="Markdown"
         )
         await status.delete()
 
     except Exception as e:
-        await status.edit_text("❌ خطا در تحلیل.")
+        await status.edit_text(f"❌ خطا: {str(e)[:100]}")
 
 def main():
     if not BOT_TOKEN:
@@ -589,7 +487,7 @@ def main():
     app.add_handler(CommandHandler("adduser", adduser))
     app.add_handler(CommandHandler("removeuser", removeuser))
     app.add_handler(CommandHandler("listusers", listusers))
-    print("Kronos Professional آماده است")
+    print("Kronos CCXT آماده است")
     app.run_polling()
 
 if __name__ == '__main__':
