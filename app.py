@@ -345,7 +345,7 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         margin, lev = DEFAULT_MARGIN, DEFAULT_LEVERAGE
 
-    status = await update.message.reply_text(f"⏳ تحلیل کامل `{symbol}` ...")
+    status = await update.message.reply_text(f"⏳ آماده‌سازی پلن معاملاتی `{symbol}` ...")
 
     try:
         df_1h = fetch_klines(symbol, "1h", 250)
@@ -375,22 +375,22 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         rets = np.diff(np.log(df_1h['close'].values))
         mu, sigma = np.mean(rets), np.std(rets)
-        sims = np.array([price * np.exp(np.cumsum(np.random.normal(mu, sigma, 24))) for _ in range(70)])
+        sims = np.array([price * np.exp(np.cumsum(np.random.normal(mu, sigma, 24))) for _ in range(60)])
         mean_path = np.mean(sims, axis=0)
 
         # تصمیم
         if higher == "صعودی" and mean_path[-1] > price and rsi < 68:
             direction = "LONG"
             signal = "🟢 LONG"
-            reason = "ساختار NDS تایم‌فریم بالاتر صعودی است و با مسیر مونت‌کارلو و RSI هم‌راستا شده."
+            reason = "ساختار NDS تایم‌فریم بالاتر صعودی است و با مونت‌کارلو و RSI هم‌راستا شده."
         elif higher == "نزولی" and mean_path[-1] < price and rsi > 32:
             direction = "SHORT"
             signal = "🔴 SHORT"
-            reason = "ساختار NDS تایم‌فریم بالاتر نزولی است و با مسیر مونت‌کارلو و RSI هم‌راستا شده."
+            reason = "ساختار NDS تایم‌فریم بالاتر نزولی است و با مونت‌کارلو و RSI هم‌راستا شده."
         else:
             direction = None
             signal = "⚪️ صبر"
-            reason = "عدم تأیید کافی از ساختار NDS تایم‌فریم‌های بالاتر. فعلاً صبر منطقی است."
+            reason = "عدم تأیید کافی از ساختار NDS تایم‌فریم‌های بالاتر."
 
         if direction:
             sl, tp = calculate_dollar_sl_tp(price, direction, atr, margin, lev, RISK_PER_TRADE)
@@ -403,106 +403,73 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         position_size = margin * lev
         risk_usd = abs(entry - sl) / entry * position_size
         reward_usd = abs(tp - entry) / entry * position_size
+        rr_ratio = reward_usd / risk_usd if risk_usd > 0 else 0
 
         fibs = calc_fib(df_1h)
         nearest_res = min([v for v in fibs.values() if v > price], default=None)
         nearest_sup = max([v for v in fibs.values() if v < price], default=None)
 
-        # ===================== نمودار کامل =====================
-        plot_df = df_1h.tail(110).copy()
-        fig, ax = plt.subplots(figsize=(12.5, 6.9))
-
-        ax.plot(plot_df['close'].values, color='#1f77b4', lw=1.8, label='قیمت', zorder=5)
-        ax.plot(plot_df['close'].rolling(20).mean().values, color='#9467bd', lw=1.15, label='SMA20', alpha=0.9)
-        ax.plot(plot_df['close'].rolling(50).mean().values, color='#ff7f0e', lw=1.35, label='SMA50')
-        ax.plot(plot_df['tenkan'].values, color='#2ca02c', lw=1.1, label='Tenkan', alpha=0.9)
-        ax.plot(plot_df['kijun'].values, color='#d62728', lw=1.1, label='Kijun', alpha=0.9)
-
-        ax.fill_between(range(len(plot_df)), plot_df['senkou_a'].values, plot_df['senkou_b'].values,
-                        where=plot_df['senkou_a'] >= plot_df['senkou_b'], color='#90ee90', alpha=0.25)
-        ax.fill_between(range(len(plot_df)), plot_df['senkou_a'].values, plot_df['senkou_b'].values,
-                        where=plot_df['senkou_a'] < plot_df['senkou_b'], color='#ffb6c1', alpha=0.25)
-
-        fib_colors = {
-            '0.0':'#111111', '0.236':'#8B0000', '0.382':'#FF4500',
-            '0.5':'#DAA520', '0.618':'#228B22', '0.786':'#1E90FF', '1.0':'#4B0082'
-        }
-        for k, v in fibs.items():
-            c = fib_colors.get(k, '#555')
-            ax.axhline(v, color=c, ls='--', lw=0.9, alpha=0.85)
-            ax.text(len(plot_df)+1.7, v, f' {k}  {v:.1f}', fontsize=8, va='center', color=c, fontweight='bold')
-
-        last = len(plot_df)-1
-        for s in sims:
-            ax.plot(range(last, last+24), s, color='gray', alpha=0.13, lw=0.7)
-        ax.plot(range(last, last+24), mean_path, color='#c0392b', lw=2.2, label='پیش‌بینی ۲۴h', zorder=6)
-
+        # نمودار
+        plot_df = df_1h.tail(100).copy()
+        fig, ax = plt.subplots(figsize=(12.3, 6.6))
+        ax.plot(plot_df['close'].values, color='#1f77b4', lw=1.7, label='قیمت')
+        ax.plot(plot_df['close'].rolling(20).mean().values, color='#9467bd', lw=1.1, label='SMA20')
+        ax.plot(plot_df['close'].rolling(50).mean().values, color='#ff7f0e', lw=1.3, label='SMA50')
+        ax.plot(plot_df['tenkan'].values, color='#2ca02c', lw=1.0, label='Tenkan')
+        ax.plot(plot_df['kijun'].values, color='#d62728', lw=1.0, label='Kijun')
+        last = len(plot_df) - 1
+        for s in sims[::4]:
+            ax.plot(range(last, last+24), s, color='gray', alpha=0.12)
+        ax.plot(range(last, last+24), mean_path, color='#c0392b', lw=2.0, label='پیش‌بینی')
         ax.yaxis.tick_right()
-        ax.yaxis.set_label_position("right")
-        ax.yaxis.set_major_locator(MaxNLocator(nbins=13))
-        ax.yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
-        ax.set_title(f"Kronos | {symbol} | NDS: {higher}", fontsize=12)
+        ax.set_title(f"Kronos | {symbol} | {higher}")
         ax.legend(loc='upper left', fontsize=8)
         ax.grid(True, alpha=0.3)
-        ax.set_xlim(0, len(plot_df)+32)
-
         buf = io.BytesIO()
-        plt.savefig(buf, format='png', bbox_inches='tight', dpi=140)
+        plt.savefig(buf, format='png', bbox_inches='tight', dpi=130)
         buf.seek(0)
         plt.close()
 
-        # فاندینگ
         base = symbol.replace("USDT", "")
         glass = f"https://www.coinglass.com/currencies/{base}/funding-rate"
-        fund_text = f"`{funding:.4f}%`" if funding is not None else f"[مشاهده در Coinglass]({glass})"
+        fund_text = f"`{funding:.4f}%`" if funding is not None else f"[Coinglass]({glass})"
 
-        # پیام ۱ - سیگنال
-        cap = (
-            f"🎯 **سیگنال | {symbol}**\n\n"
+        # ========== پیام ۱: پلن معاملاتی ==========
+        plan = (
+            f"📋 **پلن معاملاتی | {symbol}**\n\n"
             f"سیگنال: **{signal}**\n"
             f"ورود: `{entry:.2f}`\n"
             f"حد ضرر: `{sl:.2f}`\n"
             f"حد سود: `{tp:.2f}`\n\n"
             f"💵 ریسک دلاری: `${risk_usd:.2f}`\n"
-            f"💵 سود احتمالی: `${reward_usd:.2f}`\n\n"
-            f"دلیل: {reason}\n\n"
-            f"💰 فاندینگ ریت: {fund_text}"
-        )
-        await update.message.reply_photo(photo=buf, caption=cap, parse_mode="Markdown")
-
-        # پیام ۲ - تحلیل کامل
-        text2 = (
-            f"📌 **مدیر ریسک**\n"
-            f"مارجین: `${margin}` | اهرم: `{lev}x`\n"
-            f"حجم پوزیشن: `${position_size:.1f}`\n\n"
-            f"🧬 **تحلیل NDS (اولویت اصلی)**\n"
-            f"بایاس غالب: **{higher}**\n"
-            f"• روزانه: {nds_d['cycle']} → **{nds_d['bias']}**\n"
-            f"• ۴ ساعته: {nds_4h['cycle']} → **{nds_4h['bias']}**\n"
-            f"• ۱۵ دقیقه: {nds_15['cycle']} → **{nds_15['bias']}**\n\n"
-            f"**سطوح کلیدی**\n"
+            f"💵 سود احتمالی: `${reward_usd:.2f}`\n"
+            f"نسبت R:R: `1 : {rr_ratio:.2f}`\n\n"
         )
         if nearest_res:
-            text2 += f"• نزدیک‌ترین مقاومت: `{nearest_res:.2f}`\n"
+            plan += f"مقاومت نزدیک: `{nearest_res:.2f}`\n"
         if nearest_sup:
-            text2 += f"• نزدیک‌ترین حمایت: `{nearest_sup:.2f}`\n"
+            plan += f"حمایت نزدیک: `{nearest_sup:.2f}`\n"
+        plan += f"\nدلیل اصلی: {reason}\n\n💰 فاندینگ: {fund_text}"
 
-        text2 += (
-            f"\n**اندیکاتورها**\n"
-            f"• RSI: `{rsi:.1f}`\n"
-            f"• ATR: `{atr:.2f}`\n"
-            f"• SMA20: `{sma20:.1f}` | SMA50: `{sma50:.1f}` | SMA200: `{sma200:.1f}`\n"
-            f"• Tenkan: `{tenkan:.1f}` | Kijun: `{kijun:.1f}`\n\n"
-            f"**سناریوها**\n"
-            f"• صعودی: حفظ ساختار HH+HL و شکست مقاومت‌های پیش‌رو\n"
-            f"• نزولی: ادامه LH+LL و از دست رفتن حمایت‌های کلیدی\n"
-            f"• رنج: نوسان بین سطوح مهم تا زمان شکست معتبر"
+        await update.message.reply_photo(photo=buf, caption=plan, parse_mode="Markdown")
+
+        # پیام ۲ - جزئیات
+        text2 = (
+            f"📌 **جزئیات مدیریت ریسک**\n"
+            f"مارجین: `${margin}` | اهرم: `{lev}x`\n"
+            f"حجم پوزیشن: `${position_size:.1f}`\n\n"
+            f"🧬 **NDS**\n"
+            f"بایاس غالب: **{higher}**\n"
+            f"• روزانه: {nds_d['cycle']} → {nds_d['bias']}\n"
+            f"• ۴ ساعته: {nds_4h['cycle']} → {nds_4h['bias']}\n"
+            f"• ۱۵ دقیقه: {nds_15['cycle']} → {nds_15['bias']}\n\n"
+            f"RSI: `{rsi:.1f}` | ATR: `{atr:.2f}`\n"
+            f"SMA20: `{sma20:.1f}` | SMA50: `{sma50:.1f}`"
         )
         await update.message.reply_text(text2, parse_mode="Markdown")
 
         await update.message.reply_text(
-            "🛡 اولویت تصمیم‌گیری همیشه با ساختار NDS تایم‌فریم بالاتر است.\n"
-            "در صورت تناقض بین ابزارها، صبر منطقی‌ترین انتخاب است.",
+            "🛡 اولویت با ساختار NDS تایم‌فریم بالاتر است.\nدر صورت تناقض، صبر توصیه می‌شود.",
             parse_mode="Markdown"
         )
         await status.delete()
