@@ -40,7 +40,7 @@ JOURNAL_FILE = "journal.json"
 DEFAULT_MARGIN = 5.0
 DEFAULT_LEVERAGE = 8
 RISK_PER_TRADE = 0.8
-RATE_LIMIT_SECONDS = 35
+RATE_LIMIT_SECONDS = 40
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -87,10 +87,10 @@ def check_rate(uid):
 
 def is_private(update): return update.effective_chat.type == "private"
 
-def fetch_klines(symbol, interval, limit=250):
+def fetch_klines(symbol, interval, limit=300):
     url = f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
     try:
-        r = requests.get(url, headers=HEADERS, timeout=12)
+        r = requests.get(url, headers=HEADERS, timeout=14)
         if r.status_code == 200:
             df = pd.DataFrame(r.json(), columns=[
                 'open_time','open','high','low','close','volume',
@@ -99,8 +99,8 @@ def fetch_klines(symbol, interval, limit=250):
             for c in ['open','high','low','close','volume']:
                 df[c] = df[c].astype(float)
             return df
-    except:
-        pass
+    except Exception as e:
+        print("Fetch error:", e)
     return None
 
 def get_funding_rate(symbol):
@@ -135,17 +135,17 @@ def add_ichimoku(df):
     df['senkou_b'] = ((df['high'].rolling(52).max() + df['low'].rolling(52).min()) / 2).shift(26)
     return df
 
-def calc_fib(df, lookback=90):
+def calc_fib(df, lookback=100):
     h = df['high'].tail(lookback).max()
     l = df['low'].tail(lookback).min()
     d = h - l
     return {
-        '0.0': h, '0.236': h-d*0.236, '0.382': h-d*0.382,
-        '0.5': h-d*0.5, '0.618': h-d*0.618, '0.786': h-d*0.786, '1.0': l
+        '0.0': h, '0.236': h - d*0.236, '0.382': h - d*0.382,
+        '0.5': h - d*0.5, '0.618': h - d*0.618, '0.786': h - d*0.786, '1.0': l
     }
 
-def find_nodes(df, mult=1.1, lb=4):
-    if df is None or len(df) < 40:
+def find_nodes(df, mult=1.15, lb=4):
+    if df is None or len(df) < 50:
         return []
     atr = calc_atr(df).bfill()
     nodes = []
@@ -158,12 +158,12 @@ def find_nodes(df, mult=1.1, lb=4):
     return nodes
 
 def analyze_nds(df):
-    if df is None or len(df) < 50:
-        return {'bias': 'خنثی', 'cycle': '—', 'info': '—'}
+    if df is None or len(df) < 60:
+        return {'bias': 'خنثی', 'cycle': '—'}
     nodes = find_nodes(df)
     price = float(df['close'].iloc[-1])
     if len(nodes) < 4:
-        return {'bias': 'خنثی', 'cycle': 'ناقص', 'info': '—'}
+        return {'bias': 'خنثی', 'cycle': 'ناقص'}
     highs = [n['price'] for n in nodes if n['type'] == 'high']
     lows = [n['price'] for n in nodes if n['type'] == 'low']
     lh = highs[-1] if highs else price
@@ -171,17 +171,16 @@ def analyze_nds(df):
     ll = lows[-1] if lows else price
     pl = lows[-2] if len(lows) > 1 else ll
     if lh > ph and ll > pl:
-        bias, cycle = "صعودی", "HH+HL"
+        return {'bias': 'صعودی', 'cycle': 'HH+HL'}
     elif lh < ph and ll < pl:
-        bias, cycle = "نزولی", "LH+LL"
+        return {'bias': 'نزولی', 'cycle': 'LH+LL'}
     else:
-        bias, cycle = "خنثی", "رنج"
-    return {'bias': bias, 'cycle': cycle, 'info': f"{lh:.2f} / {ll:.2f}"}
+        return {'bias': 'خنثی', 'cycle': 'رنج'}
 
 def calculate_dollar_sl_tp(entry, direction, atr, margin=5.0, leverage=8, risk_dollar=0.8):
     position_size = margin * leverage
     price_risk = (risk_dollar / position_size) * entry
-    atr_distance = atr * 1.45
+    atr_distance = atr * 1.5
     final_distance = max(price_risk, atr_distance)
     if direction == "LONG":
         sl = entry - final_distance
@@ -191,12 +190,85 @@ def calculate_dollar_sl_tp(entry, direction, atr, margin=5.0, leverage=8, risk_d
         tp = entry - final_distance * 2.2
     return round(sl, 2), round(tp, 2)
 
+def create_professional_chart(df, title, fibs=None, sims=None, mean_path=None, 
+                               entry=None, sl=None, tp=None, show_prev_day=False):
+    """ساخت نمودار حرفه‌ای"""
+    plot_df = df.tail(120).copy() if len(df) > 120 else df.copy()
+    
+    fig, ax = plt.subplots(figsize=(13, 7.2))
+    
+    # قیمت
+    ax.plot(plot_df['close'].values, color='#1f77b4', lw=1.9, label='قیمت', zorder=5)
+    
+    # میانگین‌ها
+    ax.plot(plot_df['close'].rolling(20).mean().values, color='#9467bd', lw=1.2, label='SMA20', alpha=0.9)
+    ax.plot(plot_df['close'].rolling(50).mean().values, color='#ff7f0e', lw=1.35, label='SMA50')
+    if len(plot_df) >= 200:
+        ax.plot(plot_df['close'].rolling(200).mean().values, color='#17becf', lw=1.4, label='SMA200', alpha=0.85)
+    
+    # ایچیموکو
+    if 'tenkan' in plot_df.columns:
+        ax.plot(plot_df['tenkan'].values, color='#2ca02c', lw=1.15, label='Tenkan', alpha=0.9)
+        ax.plot(plot_df['kijun'].values, color='#d62728', lw=1.15, label='Kijun', alpha=0.9)
+        ax.fill_between(range(len(plot_df)), plot_df['senkou_a'].values, plot_df['senkou_b'].values,
+                        where=plot_df['senkou_a'] >= plot_df['senkou_b'], color='#90ee90', alpha=0.28)
+        ax.fill_between(range(len(plot_df)), plot_df['senkou_a'].values, plot_df['senkou_b'].values,
+                        where=plot_df['senkou_a'] < plot_df['senkou_b'], color='#ffb6c1', alpha=0.28)
+    
+    # فیبوناچی
+    if fibs:
+        colors = {
+            '0.0': '#111111', '0.236': '#8B0000', '0.382': '#FF4500',
+            '0.5': '#DAA520', '0.618': '#228B22', '0.786': '#1E90FF', '1.0': '#4B0082'
+        }
+        for k, v in fibs.items():
+            c = colors.get(k, '#555')
+            ax.axhline(v, color=c, ls='--', lw=0.95, alpha=0.85)
+            ax.text(len(plot_df) + 1.8, v, f' {k}  {v:.1f}', fontsize=8.2, va='center', color=c, fontweight='bold')
+    
+    # مونت‌کارلو
+    if sims is not None and mean_path is not None:
+        last = len(plot_df) - 1
+        for s in sims[::3]:
+            ax.plot(range(last, last + len(mean_path)), s, color='gray', alpha=0.11, lw=0.7)
+        ax.plot(range(last, last + len(mean_path)), mean_path, color='#c0392b', lw=2.15, label='پیش‌بینی', zorder=6)
+    
+    # سطوح سیگنال
+    if entry:
+        ax.axhline(entry, color='#3498db', ls='-', lw=1.4, alpha=0.9, label=f'Entry {entry:.1f}')
+    if sl:
+        ax.axhline(sl, color='#e74c3c', ls='-', lw=1.4, alpha=0.9, label=f'SL {sl:.1f}')
+    if tp:
+        ax.axhline(tp, color='#27ae60', ls='-', lw=1.4, alpha=0.9, label=f'TP {tp:.1f}')
+    
+    # خط Open و Close روز قبل (برای نمودار روزانه)
+    if show_prev_day and len(df) >= 2:
+        prev_open = df['open'].iloc[-2]
+        prev_close = df['close'].iloc[-2]
+        ax.axhline(prev_open, color='#8e44ad', ls=':', lw=1.3, alpha=0.8, label=f'Prev Open {prev_open:.1f}')
+        ax.axhline(prev_close, color='#f39c12', ls=':', lw=1.3, alpha=0.8, label=f'Prev Close {prev_close:.1f}')
+    
+    ax.yaxis.tick_right()
+    ax.yaxis.set_label_position("right")
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=14))
+    ax.yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
+    ax.set_title(title, fontsize=13, pad=11)
+    ax.legend(loc='upper left', fontsize=8, framealpha=0.93)
+    ax.grid(True, alpha=0.28)
+    ax.set_xlim(0, len(plot_df) + 28)
+    
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', bbox_inches='tight', dpi=145)
+    buf.seek(0)
+    plt.close()
+    return buf
+
 # ===================== دستورات =====================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_private(update): return
     await update.message.reply_text(
-        "🤖 **Kronos | دستیار جامع ترید**\n\n"
+        "🤖 **Kronos | دستیار جامع و حرفه‌ای ترید**\n\n"
         "`/predict`  `/news`\n"
         "`/buy`  `/status`\n"
         "`/log`  `/performance`\n"
@@ -345,27 +417,27 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         margin, lev = DEFAULT_MARGIN, DEFAULT_LEVERAGE
 
-    status = await update.message.reply_text(f"⏳ آماده‌سازی پلن معاملاتی `{symbol}` ...")
+    status = await update.message.reply_text(f"⏳ تحلیل حرفه‌ای `{symbol}` (۴H + Daily) ...")
 
     try:
-        df_1h = fetch_klines(symbol, "1h", 250)
-        df_15m = fetch_klines(symbol, "15m", 180)
-        df_4h = fetch_klines(symbol, "4h", 150)
-        df_1d = fetch_klines(symbol, "1d", 120)
+        # داده‌ها
+        df_4h = fetch_klines(symbol, "4h", 300)
+        df_1d = fetch_klines(symbol, "1d", 200)
+        df_15m = fetch_klines(symbol, "15m", 150)
 
-        if df_1h is None or len(df_1h) < 60:
+        if df_4h is None or len(df_4h) < 80:
             await status.edit_text("❌ خطا در دریافت داده.")
             return
 
-        df_1h = add_ichimoku(df_1h)
-        price = float(df_1h['close'].iloc[-1])
-        rsi = float(safe_rsi(df_1h['close']).iloc[-1])
-        atr = float(calc_atr(df_1h).iloc[-1])
-        sma20 = float(df_1h['close'].rolling(20).mean().iloc[-1])
-        sma50 = float(df_1h['close'].rolling(50).mean().iloc[-1])
-        sma200 = float(df_1h['close'].rolling(200).mean().iloc[-1]) if len(df_1h) >= 200 else sma50
-        tenkan = float(df_1h['tenkan'].iloc[-1])
-        kijun = float(df_1h['kijun'].iloc[-1])
+        df_4h = add_ichimoku(df_4h)
+        df_1d = add_ichimoku(df_1d)
+
+        price = float(df_4h['close'].iloc[-1])
+        rsi = float(safe_rsi(df_4h['close']).iloc[-1])
+        atr = float(calc_atr(df_4h).iloc[-1])
+        sma20 = float(df_4h['close'].rolling(20).mean().iloc[-1])
+        sma50 = float(df_4h['close'].rolling(50).mean().iloc[-1])
+        sma200 = float(df_4h['close'].rolling(200).mean().iloc[-1]) if len(df_4h) >= 200 else sma50
 
         funding = get_funding_rate(symbol)
         nds_d = analyze_nds(df_1d)
@@ -373,17 +445,18 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         nds_15 = analyze_nds(df_15m)
         higher = nds_d['bias'] if nds_d['bias'] != "خنثی" else nds_4h['bias']
 
-        rets = np.diff(np.log(df_1h['close'].values))
+        # مونت‌کارلو روی ۴ ساعته
+        rets = np.diff(np.log(df_4h['close'].values[-100:]))
         mu, sigma = np.mean(rets), np.std(rets)
-        sims = np.array([price * np.exp(np.cumsum(np.random.normal(mu, sigma, 24))) for _ in range(60)])
+        sims = np.array([price * np.exp(np.cumsum(np.random.normal(mu, sigma, 18))) for _ in range(55)])
         mean_path = np.mean(sims, axis=0)
 
         # تصمیم
-        if higher == "صعودی" and mean_path[-1] > price and rsi < 68:
+        if higher == "صعودی" and mean_path[-1] > price and rsi < 67:
             direction = "LONG"
             signal = "🟢 LONG"
             reason = "ساختار NDS تایم‌فریم بالاتر صعودی است و با مونت‌کارلو و RSI هم‌راستا شده."
-        elif higher == "نزولی" and mean_path[-1] < price and rsi > 32:
+        elif higher == "نزولی" and mean_path[-1] < price and rsi > 33:
             direction = "SHORT"
             signal = "🔴 SHORT"
             reason = "ساختار NDS تایم‌فریم بالاتر نزولی است و با مونت‌کارلو و RSI هم‌راستا شده."
@@ -397,44 +470,48 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             entry = price
         else:
             entry = price
-            sl = price - atr * 1.3
-            tp = price + atr * 1.3
+            sl = price - atr * 1.35
+            tp = price + atr * 1.35
 
         position_size = margin * lev
         risk_usd = abs(entry - sl) / entry * position_size
         reward_usd = abs(tp - entry) / entry * position_size
-        rr_ratio = reward_usd / risk_usd if risk_usd > 0 else 0
+        rr = reward_usd / risk_usd if risk_usd > 0 else 0
 
-        fibs = calc_fib(df_1h)
-        nearest_res = min([v for v in fibs.values() if v > price], default=None)
-        nearest_sup = max([v for v in fibs.values() if v < price], default=None)
+        fibs_4h = calc_fib(df_4h)
+        fibs_1d = calc_fib(df_1d)
 
-        # نمودار
-        plot_df = df_1h.tail(100).copy()
-        fig, ax = plt.subplots(figsize=(12.3, 6.6))
-        ax.plot(plot_df['close'].values, color='#1f77b4', lw=1.7, label='قیمت')
-        ax.plot(plot_df['close'].rolling(20).mean().values, color='#9467bd', lw=1.1, label='SMA20')
-        ax.plot(plot_df['close'].rolling(50).mean().values, color='#ff7f0e', lw=1.3, label='SMA50')
-        ax.plot(plot_df['tenkan'].values, color='#2ca02c', lw=1.0, label='Tenkan')
-        ax.plot(plot_df['kijun'].values, color='#d62728', lw=1.0, label='Kijun')
-        last = len(plot_df) - 1
-        for s in sims[::4]:
-            ax.plot(range(last, last+24), s, color='gray', alpha=0.12)
-        ax.plot(range(last, last+24), mean_path, color='#c0392b', lw=2.0, label='پیش‌بینی')
-        ax.yaxis.tick_right()
-        ax.set_title(f"Kronos | {symbol} | {higher}")
-        ax.legend(loc='upper left', fontsize=8)
-        ax.grid(True, alpha=0.3)
-        buf = io.BytesIO()
-        plt.savefig(buf, format='png', bbox_inches='tight', dpi=130)
-        buf.seek(0)
-        plt.close()
+        nearest_res = min([v for v in fibs_4h.values() if v > price], default=None)
+        nearest_sup = max([v for v in fibs_4h.values() if v < price], default=None)
+
+        # ===== نمودار ۱: ۴ ساعته =====
+        buf1 = create_professional_chart(
+            df_4h, 
+            title=f"Kronos | {symbol} | 4H | NDS: {higher}",
+            fibs=fibs_4h,
+            sims=sims,
+            mean_path=mean_path,
+            entry=entry if direction else None,
+            sl=sl if direction else None,
+            tp=tp if direction else None
+        )
+
+        # ===== نمودار ۲: روزانه =====
+        buf2 = create_professional_chart(
+            df_1d,
+            title=f"Kronos | {symbol} | Daily | Signal Levels",
+            fibs=fibs_1d,
+            entry=entry,
+            sl=sl,
+            tp=tp,
+            show_prev_day=True
+        )
 
         base = symbol.replace("USDT", "")
         glass = f"https://www.coinglass.com/currencies/{base}/funding-rate"
         fund_text = f"`{funding:.4f}%`" if funding is not None else f"[Coinglass]({glass})"
 
-        # ========== پیام ۱: پلن معاملاتی ==========
+        # پیام ۱ - پلن + نمودار ۴ ساعته
         plan = (
             f"📋 **پلن معاملاتی | {symbol}**\n\n"
             f"سیگنال: **{signal}**\n"
@@ -443,39 +520,45 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"حد سود: `{tp:.2f}`\n\n"
             f"💵 ریسک دلاری: `${risk_usd:.2f}`\n"
             f"💵 سود احتمالی: `${reward_usd:.2f}`\n"
-            f"نسبت R:R: `1 : {rr_ratio:.2f}`\n\n"
+            f"نسبت R:R ← `1 : {rr:.2f}`\n\n"
         )
         if nearest_res:
             plan += f"مقاومت نزدیک: `{nearest_res:.2f}`\n"
         if nearest_sup:
             plan += f"حمایت نزدیک: `{nearest_sup:.2f}`\n"
-        plan += f"\nدلیل اصلی: {reason}\n\n💰 فاندینگ: {fund_text}"
+        plan += f"\nدلیل: {reason}\n\n💰 فاندینگ: {fund_text}"
 
-        await update.message.reply_photo(photo=buf, caption=plan, parse_mode="Markdown")
+        await update.message.reply_photo(photo=buf1, caption=plan, parse_mode="Markdown")
 
-        # پیام ۲ - جزئیات
-        text2 = (
-            f"📌 **جزئیات مدیریت ریسک**\n"
-            f"مارجین: `${margin}` | اهرم: `{lev}x`\n"
-            f"حجم پوزیشن: `${position_size:.1f}`\n\n"
+        # پیام ۲ - نمودار روزانه
+        await update.message.reply_photo(
+            photo=buf2, 
+            caption=f"📅 **نمودار روزانه {symbol}**\nسطوح سیگنال + Open/Close روز قبل مشخص شده‌اند.",
+            parse_mode="Markdown"
+        )
+
+        # پیام ۳ - جزئیات
+        text3 = (
+            f"📌 **جزئیات**\n"
+            f"مارجین: `${margin}` | اهرم: `{lev}x` | حجم: `${position_size:.1f}`\n\n"
             f"🧬 **NDS**\n"
             f"بایاس غالب: **{higher}**\n"
             f"• روزانه: {nds_d['cycle']} → {nds_d['bias']}\n"
             f"• ۴ ساعته: {nds_4h['cycle']} → {nds_4h['bias']}\n"
             f"• ۱۵ دقیقه: {nds_15['cycle']} → {nds_15['bias']}\n\n"
             f"RSI: `{rsi:.1f}` | ATR: `{atr:.2f}`\n"
-            f"SMA20: `{sma20:.1f}` | SMA50: `{sma50:.1f}`"
+            f"SMA20: `{sma20:.1f}` | SMA50: `{sma50:.1f}` | SMA200: `{sma200:.1f}`"
         )
-        await update.message.reply_text(text2, parse_mode="Markdown")
+        await update.message.reply_text(text3, parse_mode="Markdown")
 
         await update.message.reply_text(
-            "🛡 اولویت با ساختار NDS تایم‌فریم بالاتر است.\nدر صورت تناقض، صبر توصیه می‌شود.",
+            "🛡 اولویت همیشه با ساختار NDS تایم‌فریم بالاتر است.\nدر صورت تناقض، صبر منطقی‌ترین انتخاب است.",
             parse_mode="Markdown"
         )
         await status.delete()
 
     except Exception as e:
-        await status.edit_text("❌ خطا در تحلیل.")
+        await status.edit_text(f"❌ خطا در تحلیل: {str(e)[:80]}")
 
 def main():
     if not BOT_TOKEN:
@@ -495,7 +578,7 @@ def main():
     app.add_handler(CommandHandler("adduser", adduser))
     app.add_handler(CommandHandler("removeuser", removeuser))
     app.add_handler(CommandHandler("listusers", listusers))
-    print("Kronos آماده است")
+    print("Kronos Professional آماده است")
     app.run_polling()
 
 if __name__ == '__main__':
