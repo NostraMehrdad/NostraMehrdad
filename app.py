@@ -37,8 +37,9 @@ SUBSCRIPTION_DAYS = 30
 USERS_FILE = "users.json"
 JOURNAL_FILE = "journal.json"
 
-DEFAULT_MARGIN = 5.0
+DEFAULT_MARGIN = 5.0          # دلار
 DEFAULT_LEVERAGE = 8
+RISK_PER_TRADE = 0.8          # حداکثر ریسک دلاری پیشنهادی از مارجین ۵ دلاری
 RATE_LIMIT_SECONDS = 35
 
 HEADERS = {
@@ -131,7 +132,7 @@ def get_crypto_news(limit=5):
                 return news
     except:
         pass
-    return ["• دریافت خودکار اخبار فعلاً محدود است.", "• Coinglass و CryptoPanic را دستی بررسی کنید."]
+    return ["• دریافت خودکار اخبار فعلاً محدود است."]
 
 def safe_rsi(s, p=14):
     d = s.diff()
@@ -197,6 +198,29 @@ def analyze_nds(df):
         bias, cycle = "خنثی", "رنج"
     return {'bias':bias, 'cycle':cycle, 'info':f"{lh:.2f} / {ll:.2f}"}
 
+def calculate_dollar_sl_tp(entry, direction, atr, margin=5.0, leverage=8, risk_dollar=0.8):
+    """
+    محاسبه حرفه‌ای حد ضرر و حد سود بر اساس ریسک دلاری
+    """
+    position_size = margin * leverage          # حجم پوزیشن به دلار
+    # فاصله قیمتی که معادل risk_dollar ضرر ایجاد می‌کند
+    price_risk = (risk_dollar / position_size) * entry
+
+    # استفاده از ATR برای واقعی‌تر کردن فاصله
+    atr_distance = atr * 1.4
+
+    # انتخاب بزرگ‌تر بین ریسک دلاری و ATR (محافظه‌کارانه)
+    final_distance = max(price_risk, atr_distance)
+
+    if direction == "LONG":
+        sl = entry - final_distance
+        tp = entry + final_distance * 2.2      # نسبت ریسک به ریوارد حدود ۱:۲.۲
+    else:  # SHORT
+        sl = entry + final_distance
+        tp = entry - final_distance * 2.2
+
+    return round(sl, 4), round(tp, 4), round(final_distance, 4)
+
 def safe_fmt(v, fmt=".4f"):
     if v is None: return None
     try: return format(v, fmt)
@@ -207,7 +231,7 @@ def safe_fmt(v, fmt=".4f"):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_private(update): return
     await update.message.reply_text(
-        "🤖 **Kronos | دستیار جامع ترید**\n\n"
+        "🤖 **Kronos | دستیار جامع و هوشمند ترید**\n\n"
         "نقش‌ها: مدیر ریسک + وکیل مدافع + مربی ژورنال\n\n"
         "`/predict`  `/news`\n"
         "`/buy`  `/status`\n"
@@ -245,9 +269,7 @@ async def tools(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• [Birdeye](https://birdeye.so)\n"
         "• [DefiLlama](https://defillama.com)\n"
         "• [CryptoQuant](https://cryptoquant.com)\n"
-        "• [GMGN](https://gmgn.ai)\n"
-        "• [Bubblemaps](https://bubblemaps.io)\n"
-        "• [Tokenomist](https://tokenomist.ai)"
+        "• [GMGN](https://gmgn.ai)"
     )
     await update.message.reply_text(text, parse_mode="Markdown", disable_web_page_preview=True)
 
@@ -351,9 +373,8 @@ async def performance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     avg_loss = (sum(losses)/loss_count) if loss_count else 0
     profit_factor = (sum(wins)/abs(sum(losses))) if losses and sum(losses) != 0 else 0
 
-    last_trades = trades[-5:]
     last_text = ""
-    for t in reversed(last_trades):
+    for t in reversed(trades[-5:]):
         sign = "+" if t.get("pnl",0) >= 0 else ""
         last_text += f"`{t['symbol']}` {t['direction']} → {sign}{t.get('pnl',0):.1f}\n"
 
@@ -388,7 +409,7 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         margin, lev = DEFAULT_MARGIN, DEFAULT_LEVERAGE
 
-    status = await update.message.reply_text(f"⏳ تحلیل کامل `{symbol}` ...")
+    status = await update.message.reply_text(f"⏳ تحلیل حرفه‌ای `{symbol}` ...")
 
     try:
         df_1h = fetch_klines(symbol, "1h", 250)
@@ -415,77 +436,95 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         nds_15 = analyze_nds(df_15m)
         higher = nds_d['bias'] if nds_d['bias'] != "خنثی" else nds_4h['bias']
 
+        # مونت‌کارلو
         rets = np.diff(np.log(df_1h['close'].values))
         mu, sigma = np.mean(rets), np.std(rets)
         sims = np.array([price * np.exp(np.cumsum(np.random.normal(mu, sigma, 24))) for _ in range(70)])
         mean_path = np.mean(sims, axis=0)
 
-        if higher == "صعودی" and mean_path[-1] > price and rsi < 65:
-            signal, entry, sl, tp = "🟢 LONG", price, price - atr*1.55, price + atr*2.4
-            reason = "NDS بالاتر صعودی + هم‌راستایی ابزارها"
-        elif higher == "نزولی" and mean_path[-1] < price and rsi > 35:
-            signal, entry, sl, tp = "🔴 SHORT", price, price + atr*1.55, price - atr*2.4
-            reason = "NDS بالاتر نزولی + هم‌راستایی ابزارها"
+        # ========== تصمیم‌گیری حرفه‌ای (اولویت NDS) ==========
+        direction = None
+        if higher == "صعودی" and mean_path[-1] > price and rsi < 68:
+            direction = "LONG"
+            signal = "🟢 LONG"
+            reason = "NDS تایم‌فریم بالاتر صعودی + تأیید مونت‌کارلو و RSI"
+        elif higher == "نزولی" and mean_path[-1] < price and rsi > 32:
+            direction = "SHORT"
+            signal = "🔴 SHORT"
+            reason = "NDS تایم‌فریم بالاتر نزولی + تأیید مونت‌کارلو و RSI"
         else:
-            signal, entry, sl, tp = "⚪️ صبر", price, price - atr*1.25, price + atr*1.25
+            direction = None
+            signal = "⚪️ صبر"
             reason = "عدم تأیید کافی ساختار NDS بالاتر"
 
-        risk = abs(entry - sl) * (margin * lev / entry)
+        # محاسبه حد ضرر و حد سود دلاری حرفه‌ای
+        if direction:
+            sl, tp, risk_distance = calculate_dollar_sl_tp(
+                entry=price,
+                direction=direction,
+                atr=atr,
+                margin=margin,
+                leverage=lev,
+                risk_dollar=RISK_PER_TRADE
+            )
+            entry = price
+        else:
+            entry = price
+            sl = price - atr * 1.3
+            tp = price + atr * 1.3
+            risk_distance = abs(entry - sl)
+
+        position_size = margin * lev
+        risk_usd = abs(entry - sl) / entry * position_size
 
         # ===================== نمودار کامل =====================
         plot_df = df_1h.tail(110).copy()
-        fig, ax = plt.subplots(figsize=(12.4, 6.8))
+        fig, ax = plt.subplots(figsize=(12.5, 6.9))
 
-        # قیمت و میانگین‌ها
         ax.plot(plot_df['close'].values, color='#1f77b4', lw=1.8, label='قیمت', zorder=5)
         ax.plot(plot_df['close'].rolling(20).mean().values, color='#9467bd', lw=1.15, label='SMA20', alpha=0.9)
         ax.plot(plot_df['close'].rolling(50).mean().values, color='#ff7f0e', lw=1.35, label='SMA50')
-
-        # ایچیموکو
         ax.plot(plot_df['tenkan'].values, color='#2ca02c', lw=1.1, label='Tenkan', alpha=0.9)
         ax.plot(plot_df['kijun'].values, color='#d62728', lw=1.1, label='Kijun', alpha=0.9)
+
         ax.fill_between(range(len(plot_df)), plot_df['senkou_a'].values, plot_df['senkou_b'].values,
                         where=plot_df['senkou_a'] >= plot_df['senkou_b'], color='#90ee90', alpha=0.25)
         ax.fill_between(range(len(plot_df)), plot_df['senkou_a'].values, plot_df['senkou_b'].values,
                         where=plot_df['senkou_a'] < plot_df['senkou_b'], color='#ffb6c1', alpha=0.25)
 
-        # فیبوناچی با قیمت و رنگ
         fibs = calc_fib(df_1h)
         fib_colors = {
-            '0.0': '#111111', '0.236': '#8B0000', '0.382': '#FF4500',
-            '0.5': '#DAA520', '0.618': '#228B22', '0.786': '#1E90FF', '1.0': '#4B0082'
+            '0.0':'#111111', '0.236':'#8B0000', '0.382':'#FF4500',
+            '0.5':'#DAA520', '0.618':'#228B22', '0.786':'#1E90FF', '1.0':'#4B0082'
         }
         for k, v in fibs.items():
-            c = fib_colors.get(k, '#555555')
+            c = fib_colors.get(k, '#555')
             ax.axhline(v, color=c, ls='--', lw=0.9, alpha=0.85)
-            ax.text(len(plot_df) + 1.7, v, f' {k}  {v:.1f}', fontsize=8, va='center', color=c, fontweight='bold')
+            ax.text(len(plot_df)+1.7, v, f' {k}  {v:.1f}', fontsize=8, va='center', color=c, fontweight='bold')
 
-        # هاله مونت‌کارلو
-        last = len(plot_df) - 1
+        last = len(plot_df)-1
         for s in sims:
             ax.plot(range(last, last+24), s, color='gray', alpha=0.13, lw=0.7)
         ax.plot(range(last, last+24), mean_path, color='#c0392b', lw=2.2, label='پیش‌بینی ۲۴h', zorder=6)
 
-        # محور قیمت سمت راست و مقیاس ریزتر
         ax.yaxis.tick_right()
         ax.yaxis.set_label_position("right")
         ax.yaxis.set_major_locator(MaxNLocator(nbins=13))
         ax.yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
         ax.set_ylabel("قیمت")
-        ax.set_title(f"Kronos | {symbol} | NDS: {higher}", fontsize=12, pad=10)
-        ax.legend(loc='upper left', fontsize=8, framealpha=0.92)
+        ax.set_title(f"Kronos | {symbol} | NDS: {higher}", fontsize=12)
+        ax.legend(loc='upper left', fontsize=8)
         ax.grid(True, alpha=0.3)
-        ax.set_xlim(0, len(plot_df) + 32)
+        ax.set_xlim(0, len(plot_df)+32)
 
         buf = io.BytesIO()
         plt.savefig(buf, format='png', bbox_inches='tight', dpi=140)
         buf.seek(0)
         plt.close()
 
-        # فاندینگ
-        base = symbol.replace("USDT", "")
+        base = symbol.replace("USDT","")
         glass = f"https://www.coinglass.com/currencies/{base}/funding-rate"
-        fund_line = f"`{safe_fmt(funding, '.4f')}%`" if funding is not None else f"[مشاهده در Coinglass]({glass})"
+        fund_line = f"`{safe_fmt(funding,'.4f')}%`" if funding is not None else f"[Coinglass]({glass})"
 
         # پیام ۱
         cap = (
@@ -495,37 +534,36 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"حد ضرر: `{sl:.2f}`\n"
             f"حد سود: `{tp:.2f}`\n"
             f"دلیل: {reason}\n\n"
-            f"💰 فاندینگ ریت: {fund_line}"
+            f"💰 فاندینگ: {fund_line}"
         )
         await update.message.reply_photo(photo=buf, caption=cap, parse_mode="Markdown")
 
-        # پیام ۲ - تحلیل جامع
+        # پیام ۲
         text2 = (
-            f"📌 **مدیر ریسک (XT.com)**\n"
+            f"📌 **مدیر ریسک حرفه‌ای (XT.com)**\n"
             f"مارجین: `${margin}`\n"
             f"اهرم: `{lev}x Isolated`\n"
-            f"حجم پوزیشن: `${margin*lev:.1f}`\n"
-            f"ریسک این ستاپ: `${risk:.2f}`\n\n"
+            f"حجم پوزیشن: `${position_size:.1f}`\n"
+            f"ریسک دلاری این ستاپ: `${risk_usd:.2f}`\n\n"
             f"🧬 **وکیل مدافع + NDS**\n"
             f"بایاس غالب: **{higher}**\n"
             f"• روزانه: {nds_d['cycle']} → **{nds_d['bias']}**\n"
             f"• ۴ ساعته: {nds_4h['cycle']} → **{nds_4h['bias']}**\n"
             f"• ۱۵ دقیقه: {nds_15['cycle']} → **{nds_15['bias']}**\n\n"
-            f"**اندیکاتورها و ساختار**\n"
-            f"• RSI: `{rsi:.1f}`\n"
-            f"• ATR: `{atr:.2f}`\n"
+            f"**اندیکاتورها**\n"
+            f"• RSI: `{rsi:.1f}` | ATR: `{atr:.2f}`\n"
             f"• SMA20: `{sma20:.1f}` | SMA50: `{sma50:.1f}` | SMA200: `{sma200:.1f}`\n"
             f"• Tenkan: `{tenkan:.1f}` | Kijun: `{kijun:.1f}`\n\n"
             f"**سناریوها**\n"
-            f"• صعودی: حفظ ساختار HH+HL و شکست مقاومت‌های پیش‌رو\n"
-            f"• نزولی: ادامه LH+LL و از دست رفتن حمایت‌های کلیدی\n"
-            f"• رنج: نوسان بین سطوح مهم تا زمان شکست معتبر"
+            f"• صعودی: حفظ HH+HL و شکست مقاومت\n"
+            f"• نزولی: ادامه LH+LL و از دست رفتن حمایت\n"
+            f"• رنج: نوسان بین سطوح کلیدی"
         )
         await update.message.reply_text(text2, parse_mode="Markdown")
 
         await update.message.reply_text(
-            "🛡 اولویت همیشه با ساختار NDS تایم‌فریم بالاتر است.\n"
-            "در صورت تناقض بین ابزارها، صبر منطقی‌ترین انتخاب است.",
+            "🛡 اولویت تصمیم‌گیری همیشه با ساختار NDS تایم‌فریم بالاتر است.\n"
+            "در صورت تناقض، صبر منطقی‌ترین انتخاب است.",
             parse_mode="Markdown"
         )
         await status.delete()
@@ -551,7 +589,7 @@ def main():
     app.add_handler(CommandHandler("adduser", adduser))
     app.add_handler(CommandHandler("removeuser", removeuser))
     app.add_handler(CommandHandler("listusers", listusers))
-    print("Kronos آماده است")
+    print("Kronos Professional آماده است")
     app.run_polling()
 
 if __name__ == '__main__':
