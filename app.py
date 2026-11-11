@@ -185,47 +185,42 @@ def analyze_nds(df):
         bias, cycle = "خنثی", "رنج"
         
     return {
-        'bias': bias,
-        'cycle': cycle,
-        'last_high': last_high,
-        'last_low': last_low,
-        'last_high_idx': last_high_idx,
-        'last_low_idx': last_low_idx
+        'bias': bias, 'cycle': cycle,
+        'last_high': last_high, 'last_low': last_low,
+        'last_high_idx': last_high_idx, 'last_low_idx': last_low_idx
     }
 
 def calculate_dollar_sl_tp(entry, direction, atr, margin=5.0, leverage=8, risk_dollar=0.8):
     position_size = margin * leverage
     price_risk = (risk_dollar / position_size) * entry
-    atr_distance = atr * 1.5
+    atr_distance = atr * 1.45
     final_distance = max(price_risk, atr_distance)
     if direction == "LONG":
         sl = entry - final_distance
-        tp = entry + final_distance * 2.2
+        tp = entry + final_distance * 2.1
     else:
         sl = entry + final_distance
-        tp = entry - final_distance * 2.2
+        tp = entry - final_distance * 2.1
     return round(sl, 2), round(tp, 2)
 
-def create_nds_chart(df, title, fibs=None, nds_info=None, bias="خنثی"):
-    """نمودار پیشرفته مخصوص /nds با علامت‌گذاری ساختار"""
-    plot_df = df.tail(120).copy() if len(df) > 120 else df.copy()
+def create_chart(df, title, fibs=None, entry=None, sl=None, tp=None, 
+                 sims=None, mean_path=None, short_horizon=True):
+    """نمودار حرفه‌ای با هاله کوتاه‌مدت (۴-۶ ساعت)"""
+    plot_df = df.tail(100).copy()
     n = len(plot_df)
     
-    # محاسبه محدوده قیمت با padding بیشتر در پایین
     price_min = plot_df['low'].min()
     price_max = plot_df['high'].max()
-    padding = (price_max - price_min) * 0.12
-    y_min = price_min - padding * 1.4
-    y_max = price_max + padding * 0.7
+    padding = (price_max - price_min) * 0.13
+    y_min = price_min - padding * 1.35
+    y_max = price_max + padding * 0.65
 
-    fig, ax = plt.subplots(figsize=(13.2, 7.4))
+    fig, ax = plt.subplots(figsize=(13, 7.2))
 
-    # قیمت و میانگین‌ها
-    ax.plot(plot_df['close'].values, color='#1f77b4', lw=1.9, label='قیمت', zorder=5)
+    ax.plot(plot_df['close'].values, color='#1f77b4', lw=1.85, label='قیمت', zorder=5)
     ax.plot(plot_df['close'].rolling(20).mean().values, color='#9467bd', lw=1.15, label='SMA20', alpha=0.9)
     ax.plot(plot_df['close'].rolling(50).mean().values, color='#ff7f0e', lw=1.3, label='SMA50')
 
-    # ایچیموکو
     if 'tenkan' in plot_df.columns:
         ax.plot(plot_df['tenkan'].values, color='#2ca02c', lw=1.1, label='Tenkan', alpha=0.9)
         ax.plot(plot_df['kijun'].values, color='#d62728', lw=1.1, label='Kijun', alpha=0.9)
@@ -234,7 +229,6 @@ def create_nds_chart(df, title, fibs=None, nds_info=None, bias="خنثی"):
         ax.fill_between(range(n), plot_df['senkou_a'].values, plot_df['senkou_b'].values,
                         where=plot_df['senkou_a'] < plot_df['senkou_b'], color='#ffb6c1', alpha=0.25)
 
-    # فیبوناچی
     if fibs:
         colors = {'0.0':'#111','0.236':'#8B0000','0.382':'#FF4500','0.5':'#DAA520',
                   '0.618':'#228B22','0.786':'#1E90FF','1.0':'#4B0082'}
@@ -243,83 +237,108 @@ def create_nds_chart(df, title, fibs=None, nds_info=None, bias="خنثی"):
             ax.axhline(v, color=c, ls='--', lw=0.9, alpha=0.8)
             ax.text(n + 1.5, v, f' {k} {v:.1f}', fontsize=8, va='center', color=c, fontweight='bold')
 
-    # علامت‌گذاری ساختار NDS
+    # هاله کوتاه‌مدت (۴ تا ۶ ساعت ≈ ۱ تا ۱.۵ کندل ۴ ساعته)
+    if sims is not None and mean_path is not None:
+        last = n - 1
+        horizon = len(mean_path)
+        for s in sims[::3]:
+            ax.plot(range(last, last + horizon), s[:horizon], color='gray', alpha=0.13, lw=0.75)
+        ax.plot(range(last, last + horizon), mean_path, color='#c0392b', lw=2.1, label='پیش‌بینی ۴-۶h', zorder=6)
+
+    if entry: ax.axhline(entry, color='#3498db', lw=1.35, label=f'Entry {entry:.1f}')
+    if sl: ax.axhline(sl, color='#e74c3c', lw=1.35, label=f'SL {sl:.1f}')
+    if tp: ax.axhline(tp, color='#27ae60', lw=1.35, label=f'TP {tp:.1f}')
+
+    ax.set_ylim(y_min, y_max)
+    ax.yaxis.tick_right()
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=13))
+    ax.yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
+    ax.set_title(title, fontsize=12.5, pad=10)
+    ax.legend(loc='upper left', fontsize=8, framealpha=0.92)
+    ax.grid(True, alpha=0.28)
+    ax.set_xlim(0, n + 18)
+
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', bbox_inches='tight', dpi=142)
+    buf.seek(0)
+    plt.close()
+    return buf
+
+def create_nds_chart(df, title, fibs=None, nds_info=None, bias="خنثی"):
+    plot_df = df.tail(115).copy()
+    n = len(plot_df)
+    
+    price_min = plot_df['low'].min()
+    price_max = plot_df['high'].max()
+    padding = (price_max - price_min) * 0.14
+    y_min = price_min - padding * 1.4
+    y_max = price_max + padding * 0.7
+
+    fig, ax = plt.subplots(figsize=(13.2, 7.3))
+
+    ax.plot(plot_df['close'].values, color='#1f77b4', lw=1.85, label='قیمت', zorder=5)
+    ax.plot(plot_df['close'].rolling(20).mean().values, color='#9467bd', lw=1.15, label='SMA20')
+    ax.plot(plot_df['close'].rolling(50).mean().values, color='#ff7f0e', lw=1.3, label='SMA50')
+
+    if 'tenkan' in plot_df.columns:
+        ax.plot(plot_df['tenkan'].values, color='#2ca02c', lw=1.1, label='Tenkan')
+        ax.plot(plot_df['kijun'].values, color='#d62728', lw=1.1, label='Kijun')
+        ax.fill_between(range(n), plot_df['senkou_a'].values, plot_df['senkou_b'].values,
+                        where=plot_df['senkou_a'] >= plot_df['senkou_b'], color='#90ee90', alpha=0.25)
+        ax.fill_between(range(n), plot_df['senkou_a'].values, plot_df['senkou_b'].values,
+                        where=plot_df['senkou_a'] < plot_df['senkou_b'], color='#ffb6c1', alpha=0.25)
+
+    if fibs:
+        colors = {'0.0':'#111','0.236':'#8B0000','0.382':'#FF4500','0.5':'#DAA520',
+                  '0.618':'#228B22','0.786':'#1E90FF','1.0':'#4B0082'}
+        for k, v in fibs.items():
+            c = colors.get(k, '#555')
+            ax.axhline(v, color=c, ls='--', lw=0.9, alpha=0.8)
+            ax.text(n + 1.5, v, f' {k} {v:.1f}', fontsize=8, va='center', color=c, fontweight='bold')
+
     if nds_info:
         last_high = nds_info.get('last_high')
         last_low = nds_info.get('last_low')
         high_idx = nds_info.get('last_high_idx')
         low_idx = nds_info.get('last_low_idx')
-
-        # تبدیل ایندکس واقعی به ایندکس plot
         offset = len(df) - n
-        
+
         if last_high and high_idx is not None:
             x_high = high_idx - offset
             if 0 <= x_high < n:
-                circle_h = Circle((x_high, last_high), radius=n*0.012, fill=False, 
-                                  edgecolor='#c0392b', linewidth=2.2, zorder=10)
-                ax.add_patch(circle_h)
-                ax.text(x_high, last_high + (y_max-y_min)*0.025, "High", 
-                        fontsize=8.5, ha='center', color='#c0392b', fontweight='bold', zorder=11)
+                circle = Circle((x_high, last_high), radius=n*0.011, fill=False, edgecolor='#c0392b', linewidth=2.1, zorder=10)
+                ax.add_patch(circle)
+                ax.text(x_high, last_high + (y_max-y_min)*0.022, "High", fontsize=8.5, ha='center', color='#c0392b', fontweight='bold')
 
         if last_low and low_idx is not None:
             x_low = low_idx - offset
             if 0 <= x_low < n:
-                circle_l = Circle((x_low, last_low), radius=n*0.012, fill=False, 
-                                  edgecolor='#27ae60', linewidth=2.2, zorder=10)
-                ax.add_patch(circle_l)
-                ax.text(x_low, last_low - (y_max-y_min)*0.03, "Low", 
-                        fontsize=8.5, ha='center', color='#27ae60', fontweight='bold', zorder=11)
+                circle = Circle((x_low, last_low), radius=n*0.011, fill=False, edgecolor='#27ae60', linewidth=2.1, zorder=10)
+                ax.add_patch(circle)
+                ax.text(x_low, last_low - (y_max-y_min)*0.028, "Low", fontsize=8.5, ha='center', color='#27ae60', fontweight='bold')
 
-        # علامت ضربدر قرمز برای ناحیه ادامه حرکت
-        current_price = float(plot_df['close'].iloc[-1])
         if bias == "صعودی" and last_high:
-            # رالی احتمالی بالای آخرین سقف
-            x_mark = n - 8
-            y_mark = last_high + (last_high - last_low) * 0.35 if last_low else last_high * 1.015
-            ax.scatter([x_mark], [y_mark], marker='x', s=180, color='#e74c3c', linewidths=2.8, zorder=12, label='احتمال ادامه')
-            ax.text(x_mark, y_mark + (y_max-y_min)*0.02, "Rally Zone", fontsize=8, ha='center', color='#e74c3c', fontweight='bold')
-            
+            x_mark = n - 7
+            y_mark = last_high + (last_high - (last_low or last_high*0.98)) * 0.28
+            ax.scatter([x_mark], [y_mark], marker='x', s=170, color='#e74c3c', linewidths=2.6, zorder=12)
+            ax.text(x_mark, y_mark + (y_max-y_min)*0.018, "Cont.", fontsize=8, ha='center', color='#e74c3c', fontweight='bold')
         elif bias == "نزولی" and last_low:
-            # ادامه نزول زیر آخرین کف
-            x_mark = n - 8
-            y_mark = last_low - (last_high - last_low) * 0.35 if last_high else last_low * 0.985
-            ax.scatter([x_mark], [y_mark], marker='x', s=180, color='#e74c3c', linewidths=2.8, zorder=12, label='احتمال ادامه')
-            ax.text(x_mark, y_mark - (y_max-y_min)*0.025, "Cont. Zone", fontsize=8, ha='center', color='#e74c3c', fontweight='bold')
+            x_mark = n - 7
+            y_mark = last_low - ((last_high or last_low*1.02) - last_low) * 0.28
+            ax.scatter([x_mark], [y_mark], marker='x', s=170, color='#e74c3c', linewidths=2.6, zorder=12)
+            ax.text(x_mark, y_mark - (y_max-y_min)*0.022, "Cont.", fontsize=8, ha='center', color='#e74c3c', fontweight='bold')
 
     ax.set_ylim(y_min, y_max)
     ax.yaxis.tick_right()
-    ax.yaxis.set_major_locator(MaxNLocator(nbins=14))
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=13))
     ax.yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
     ax.set_title(title, fontsize=12.5, pad=10)
-    ax.legend(loc='upper left', fontsize=8, framealpha=0.92)
-    ax.grid(True, alpha=0.28)
-    ax.set_xlim(0, n + 22)
-
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png', bbox_inches='tight', dpi=145)
-    buf.seek(0)
-    plt.close()
-    return buf
-
-def create_simple_chart(df, title, fibs=None, entry=None, sl=None, tp=None):
-    plot_df = df.tail(100).copy()
-    fig, ax = plt.subplots(figsize=(12.5, 6.6))
-    ax.plot(plot_df['close'].values, color='#1f77b4', lw=1.75, label='قیمت')
-    ax.plot(plot_df['close'].rolling(20).mean().values, color='#9467bd', lw=1.1, label='SMA20')
-    ax.plot(plot_df['close'].rolling(50).mean().values, color='#ff7f0e', lw=1.25, label='SMA50')
-    if 'tenkan' in plot_df.columns:
-        ax.plot(plot_df['tenkan'].values, color='#2ca02c', lw=1.0, label='Tenkan')
-        ax.plot(plot_df['kijun'].values, color='#d62728', lw=1.0, label='Kijun')
-    if entry: ax.axhline(entry, color='#3498db', lw=1.3, label=f'Entry')
-    if sl: ax.axhline(sl, color='#e74c3c', lw=1.3, label=f'SL')
-    if tp: ax.axhline(tp, color='#27ae60', lw=1.3, label=f'TP')
-    ax.yaxis.tick_right()
-    ax.set_title(title, fontsize=12)
     ax.legend(loc='upper left', fontsize=8)
-    ax.grid(True, alpha=0.3)
+    ax.grid(True, alpha=0.28)
+    ax.set_xlim(0, n + 20)
+
     buf = io.BytesIO()
-    plt.savefig(buf, format='png', bbox_inches='tight', dpi=130)
+    plt.savefig(buf, format='png', bbox_inches='tight', dpi=142)
     buf.seek(0)
     plt.close()
     return buf
@@ -466,7 +485,7 @@ async def nds_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     args = context.args
     symbol = args[0].upper() if args else "BTCUSDT"
-    status = await update.message.reply_text(f"⏳ تحلیل پیشرفته ساختار NDS `{symbol}` ...")
+    status = await update.message.reply_text(f"⏳ تحلیل ساختار NDS `{symbol}` ...")
 
     try:
         df_4h = fetch_klines(symbol, "4h", 300)
@@ -495,30 +514,18 @@ async def nds_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cont_text = (
                 f"ساختار فعلی **صعودی (HH+HL)** است.\n"
                 f"• ناحیه ادامه حرکت عمدتاً بالای آخرین کف مهم (`{last_low:.1f}`) قرار دارد.\n"
-                f"• تا زمانی که قیمت بالای این کف تثبیت شود، احتمال ادامه حرکت صعودی بیشتر است.\n"
-                f"• شکست معتبر زیر آخرین کف می‌تواند ساختار را تضعیف کند."
+                f"• تا زمانی که قیمت بالای این کف تثبیت شود، احتمال ادامه حرکت صعودی بیشتر است."
             )
         elif higher == "نزولی":
             cont_text = (
                 f"ساختار فعلی **نزولی (LH+LL)** است.\n"
                 f"• ناحیه ادامه حرکت عمدتاً زیر آخرین سقف مهم (`{last_high:.1f}`) قرار دارد.\n"
-                f"• تا زمانی که قیمت زیر این سقف باقی بماند، احتمال ادامه حرکت نزولی بیشتر است.\n"
-                f"• شکست معتبر بالای آخرین سقف می‌تواند ساختار را تضعیف کند."
+                f"• تا زمانی که قیمت زیر این سقف باقی بماند، احتمال ادامه حرکت نزولی بیشتر است."
             )
         else:
-            cont_text = (
-                f"ساختار فعلی رنج یا انتقالی است.\n"
-                f"• قیمت بین آخرین سقف و کف مهم در نوسان است.\n"
-                f"• تا زمان شکست معتبر یکی از دو سمت، ادامه حرکت جهت‌دار ضعیف‌تر ارزیابی می‌شود."
-            )
+            cont_text = "ساختار فعلی رنج یا انتقالی است. تا شکست معتبر یکی از دو سمت، جهت‌گیری ضعیف‌تر است."
 
-        buf = create_nds_chart(
-            df_4h,
-            title=f"Kronos NDS | {symbol} | 4H | Bias: {higher}",
-            fibs=fibs,
-            nds_info=nds_4h,
-            bias=higher
-        )
+        buf = create_nds_chart(df_4h, f"Kronos NDS | {symbol} | 4H | {higher}", fibs=fibs, nds_info=nds_4h, bias=higher)
 
         text = (
             f"🧬 **تحلیل ساختار NDS | {symbol}**\n\n"
@@ -526,15 +533,12 @@ async def nds_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• روزانه: {nds_d['cycle']} → **{nds_d['bias']}**\n"
             f"• ۴ ساعته: {nds_4h['cycle']} → **{nds_4h['bias']}**\n"
             f"• ۱۵ دقیقه: {nds_15['cycle']} → **{nds_15['bias']}**\n\n"
-            f"**سطوح کلیدی ساختار**\n"
+            f"**سطوح کلیدی**\n"
         )
-        if last_high:
-            text += f"• آخرین سقف مهم: `{last_high:.1f}`\n"
-        if last_low:
-            text += f"• آخرین کف مهم: `{last_low:.1f}`\n"
-
-        text += f"\n**تحلیل نواحی ادامه حرکت**\n{cont_text}\n\n"
-        text += f"RSI: `{rsi:.1f}` | ATR: `{atr:.2f}` | قیمت فعلی: `{price:.2f}`"
+        if last_high: text += f"• آخرین سقف: `{last_high:.1f}`\n"
+        if last_low: text += f"• آخرین کف: `{last_low:.1f}`\n"
+        text += f"\n**نواحی ادامه حرکت**\n{cont_text}\n\n"
+        text += f"RSI: `{rsi:.1f}` | ATR: `{atr:.2f}` | قیمت: `{price:.2f}`"
 
         await update.message.reply_photo(photo=buf, caption=text, parse_mode="Markdown")
         await status.delete()
@@ -560,7 +564,7 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         margin, lev = DEFAULT_MARGIN, DEFAULT_LEVERAGE
 
-    status = await update.message.reply_text(f"⏳ تحلیل `{symbol}` ...")
+    status = await update.message.reply_text(f"⏳ تحلیل کوتاه‌مدت `{symbol}` ...")
 
     try:
         df_4h = fetch_klines(symbol, "4h", 250)
@@ -582,26 +586,35 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         nds_15 = analyze_nds(df_15m)
         higher = nds_d['bias'] if nds_d['bias'] != "خنثی" else nds_4h['bias']
 
-        if higher == "صعودی" and rsi < 67:
+        # مونت‌کارلو کوتاه‌مدت (حدود ۱ تا ۱.۵ کندل ۴ ساعته = ۴ تا ۶ ساعت)
+        rets = np.diff(np.log(df_4h['close'].values[-80:]))
+        mu, sigma = np.mean(rets), np.std(rets)
+        horizon = 2          # تقریباً ۸ ساعت روی تایم ۴ ساعته (محافظه‌کارانه ۴-۶ ساعت مفید)
+        sims = np.array([price * np.exp(np.cumsum(np.random.normal(mu, sigma, horizon))) for _ in range(50)])
+        mean_path = np.mean(sims, axis=0)
+
+        # تصمیم با افق کوتاه‌مدت
+        short_bias = mean_path[-1] > price
+        if higher == "صعودی" and short_bias and rsi < 68:
             direction = "LONG"
             signal = "🟢 LONG"
-            reason = "ساختار NDS بالاتر صعودی است."
-        elif higher == "نزولی" and rsi > 33:
+            reason = "ساختار NDS بالاتر صعودی + تأیید کوتاه‌مدت مونت‌کارلو"
+        elif higher == "نزولی" and not short_bias and rsi > 32:
             direction = "SHORT"
             signal = "🔴 SHORT"
-            reason = "ساختار NDS بالاتر نزولی است."
+            reason = "ساختار NDS بالاتر نزولی + تأیید کوتاه‌مدت مونت‌کارلو"
         else:
             direction = None
             signal = "⚪️ صبر"
-            reason = "عدم تأیید کافی ساختار NDS بالاتر."
+            reason = "عدم تأیید کافی ساختار + افق کوتاه‌مدت"
 
         if direction:
             sl, tp = calculate_dollar_sl_tp(price, direction, atr, margin, lev, RISK_PER_TRADE)
             entry = price
         else:
             entry = price
-            sl = price - atr * 1.3
-            tp = price + atr * 1.3
+            sl = price - atr * 1.25
+            tp = price + atr * 1.25
 
         position_size = margin * lev
         risk_usd = abs(entry - sl) / entry * position_size
@@ -609,7 +622,9 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rr = reward_usd / risk_usd if risk_usd > 0 else 0
 
         fibs = calc_fib(df_4h)
-        buf = create_simple_chart(df_4h, f"Kronos | {symbol} | 4H | {higher}", fibs=fibs, entry=entry, sl=sl, tp=tp)
+        buf = create_chart(df_4h, f"Kronos | {symbol} | 4H | {higher}", 
+                           fibs=fibs, entry=entry, sl=sl, tp=tp,
+                           sims=sims, mean_path=mean_path)
 
         base = symbol.replace("USDT", "")
         glass = f"https://www.coinglass.com/currencies/{base}/funding-rate"
