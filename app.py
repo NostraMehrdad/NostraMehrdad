@@ -14,6 +14,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator, FormatStrFormatter
 from matplotlib.patches import Circle
+from matplotlib.gridspec import GridSpec
 
 from flask import Flask
 from telegram import Update
@@ -129,11 +130,27 @@ def calc_atr(df, period=14):
     ], axis=1).max(axis=1)
     return tr.rolling(period).mean()
 
-def add_ichimoku(df):
+def add_indicators(df):
+    df = df.copy()
+    df['sma20'] = df['close'].rolling(20).mean()
+    df['sma50'] = df['close'].rolling(50).mean()
+    df['sma200'] = df['close'].rolling(200).mean()
+    df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
+    df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
+    
+    # Bollinger
+    df['bb_mid'] = df['close'].rolling(20).mean()
+    df['bb_std'] = df['close'].rolling(20).std()
+    df['bb_upper'] = df['bb_mid'] + 2 * df['bb_std']
+    df['bb_lower'] = df['bb_mid'] - 2 * df['bb_std']
+    
+    # Ichimoku
     df['tenkan'] = (df['high'].rolling(9).max() + df['low'].rolling(9).min()) / 2
     df['kijun'] = (df['high'].rolling(26).max() + df['low'].rolling(26).min()) / 2
     df['senkou_a'] = ((df['tenkan'] + df['kijun']) / 2).shift(26)
     df['senkou_b'] = ((df['high'].rolling(52).max() + df['low'].rolling(52).min()) / 2).shift(26)
+    
+    df['rsi'] = safe_rsi(df['close'])
     return df
 
 def calc_fib(df, lookback=100):
@@ -203,148 +220,124 @@ def calculate_dollar_sl_tp(entry, direction, atr, margin=5.0, leverage=8, risk_d
         tp = entry - final_distance * 2.1
     return round(sl, 2), round(tp, 2)
 
-def create_chart(df, title, fibs=None, entry=None, sl=None, tp=None, sims=None, mean_path=None):
+def create_pro_chart(df, title, fibs=None, entry=None, sl=None, tp=None, 
+                     sims=None, mean_path=None, nds_info=None, bias=None):
+    """نمودار حرفه‌ای با Volume و RSI"""
     plot_df = df.tail(100).copy()
     n = len(plot_df)
     
-    price_min = plot_df['low'].min()
-    price_max = plot_df['high'].max()
-    padding = (price_max - price_min) * 0.15
-    y_min = price_min - padding * 1.5
-    y_max = price_max + padding * 0.7
-
-    fig, ax = plt.subplots(figsize=(13.5, 7.5), facecolor='black')
-    ax.set_facecolor('black')
-
-    ax.plot(plot_df['close'].values, color='#00bfff', lw=1.9, label='قیمت', zorder=5)
-    ax.plot(plot_df['close'].rolling(20).mean().values, color='#da70d6', lw=1.2, label='SMA20', alpha=0.9)
-    ax.plot(plot_df['close'].rolling(50).mean().values, color='#ffa500', lw=1.35, label='SMA50')
-
-    if 'tenkan' in plot_df.columns:
-        ax.plot(plot_df['tenkan'].values, color='#32cd32', lw=1.15, label='Tenkan', alpha=0.9)
-        ax.plot(plot_df['kijun'].values, color='#ff4500', lw=1.15, label='Kijun', alpha=0.9)
+    fig = plt.figure(figsize=(14, 9.2), facecolor='#0d0d0d')
+    gs = GridSpec(4, 1, height_ratios=[3.2, 0.9, 0.9, 0.05], hspace=0.08)
+    
+    ax = fig.add_subplot(gs[0])
+    ax_vol = fig.add_subplot(gs[1], sharex=ax)
+    ax_rsi = fig.add_subplot(gs[2], sharex=ax)
+    
+    for a in [ax, ax_vol, ax_rsi]:
+        a.set_facecolor('#0d0d0d')
+        a.tick_params(colors='#cccccc', labelsize=8)
+        for spine in a.spines.values():
+            spine.set_color('#333333')
+    
+    # === قیمت و اندیکاتورها ===
+    ax.plot(plot_df['close'].values, color='#00bfff', lw=1.7, label='Price', zorder=5)
+    ax.plot(plot_df['sma20'].values, color='#da70d6', lw=1.1, label='MA20', alpha=0.9)
+    ax.plot(plot_df['sma50'].values, color='#ffa500', lw=1.2, label='MA50')
+    if 'sma200' in plot_df.columns:
+        ax.plot(plot_df['sma200'].values, color='#1e90ff', lw=1.25, label='MA200', alpha=0.85)
+    ax.plot(plot_df['ema20'].values, color='#00fa9a', lw=1.0, label='EMA20', alpha=0.85)
+    ax.plot(plot_df['ema50'].values, color='#ff6347', lw=1.05, label='EMA50', alpha=0.85)
+    
+    # Bollinger
+    ax.plot(plot_df['bb_upper'].values, color='#888888', lw=0.9, ls='--', alpha=0.7)
+    ax.plot(plot_df['bb_lower'].values, color='#888888', lw=0.9, ls='--', alpha=0.7)
+    ax.fill_between(range(n), plot_df['bb_upper'].values, plot_df['bb_lower'].values, color='#444444', alpha=0.15)
+    
+    # Ichimoku cloud
+    if 'senkou_a' in plot_df.columns:
         ax.fill_between(range(n), plot_df['senkou_a'].values, plot_df['senkou_b'].values,
-                        where=plot_df['senkou_a'] >= plot_df['senkou_b'], color='#00ff7f', alpha=0.18)
+                        where=plot_df['senkou_a'] >= plot_df['senkou_b'], color='#00ff7f', alpha=0.12)
         ax.fill_between(range(n), plot_df['senkou_a'].values, plot_df['senkou_b'].values,
-                        where=plot_df['senkou_a'] < plot_df['senkou_b'], color='#ff69b4', alpha=0.18)
-
+                        where=plot_df['senkou_a'] < plot_df['senkou_b'], color='#ff69b4', alpha=0.12)
+    
+    # Fibonacci
     if fibs:
         colors = {'0.0':'#ffffff', '0.236':'#ff6b6b', '0.382':'#ff9f43', '0.5':'#feca57',
-                  '0.618':'#1dd1a1', '0.786':'#54a0ff', '1.0':'#5f27cd'}
+                  '0.618':'#1dd1a1', '0.786':'#54a0ff', '1.0':'#a55eea'}
         for k, v in fibs.items():
             c = colors.get(k, '#aaaaaa')
-            ax.axhline(v, color=c, ls='--', lw=0.95, alpha=0.85)
-            ax.text(n + 1.6, v, f' {k}  {v:.1f}', fontsize=8.5, va='center', color=c, fontweight='bold')
-
+            ax.axhline(v, color=c, ls=':', lw=0.9, alpha=0.8)
+            ax.text(n + 1.2, v, f'{k} {v:.0f}', fontsize=7.5, va='center', color=c)
+    
+    # سطوح سیگنال
+    if entry: ax.axhline(entry, color='#1e90ff', lw=1.4, label=f'Entry')
+    if sl: ax.axhline(sl, color='#ff4757', lw=1.4, label=f'SL')
+    if tp: ax.axhline(tp, color='#2ed573', lw=1.4, label=f'TP')
+    
+    # مونت‌کارلو کوتاه
     if sims is not None and mean_path is not None:
         last = n - 1
         horizon = len(mean_path)
-        for s in sims[::2]:
-            ax.plot(range(last, last + horizon), s[:horizon], color='#aaaaaa', alpha=0.14, lw=0.8)
-        ax.plot(range(last, last + horizon), mean_path, color='#ff4757', lw=2.2, label='پیش‌بینی ۴-۶h', zorder=6)
-
-    if entry: ax.axhline(entry, color='#1e90ff', lw=1.5, label=f'Entry {entry:.1f}')
-    if sl: ax.axhline(sl, color='#ff4757', lw=1.5, label=f'SL {sl:.1f}')
-    if tp: ax.axhline(tp, color='#2ed573', lw=1.5, label=f'TP {tp:.1f}')
-
-    ax.set_ylim(y_min, y_max)
-    ax.yaxis.tick_right()
-    ax.yaxis.set_major_locator(MaxNLocator(nbins=14))
-    ax.yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
-    ax.tick_params(colors='white', labelsize=9)
-    ax.set_title(title, fontsize=13, pad=12, color='white')
-    ax.legend(loc='upper left', fontsize=8.5, facecolor='#111111', edgecolor='#333333', labelcolor='white')
-    ax.grid(True, alpha=0.25, color='#444444')
-    ax.set_xlim(0, n + 20)
-    for spine in ax.spines.values():
-        spine.set_color('#444444')
-
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png', bbox_inches='tight', dpi=160, facecolor='black')
-    buf.seek(0)
-    plt.close()
-    return buf
-
-def create_nds_chart(df, title, fibs=None, nds_info=None, bias="خنثی"):
-    plot_df = df.tail(115).copy()
-    n = len(plot_df)
+        for s in sims[::3]:
+            ax.plot(range(last, last+horizon), s[:horizon], color='#777777', alpha=0.12, lw=0.7)
+        ax.plot(range(last, last+horizon), mean_path, color='#ff4757', lw=1.9, label='Pred 4-6h', zorder=6)
     
-    price_min = plot_df['low'].min()
-    price_max = plot_df['high'].max()
-    padding = (price_max - price_min) * 0.16
-    y_min = price_min - padding * 1.55
-    y_max = price_max + padding * 0.75
-
-    fig, ax = plt.subplots(figsize=(13.5, 7.6), facecolor='black')
-    ax.set_facecolor('black')
-
-    ax.plot(plot_df['close'].values, color='#00bfff', lw=1.9, label='قیمت', zorder=5)
-    ax.plot(plot_df['close'].rolling(20).mean().values, color='#da70d6', lw=1.2, label='SMA20')
-    ax.plot(plot_df['close'].rolling(50).mean().values, color='#ffa500', lw=1.35, label='SMA50')
-
-    if 'tenkan' in plot_df.columns:
-        ax.plot(plot_df['tenkan'].values, color='#32cd32', lw=1.15, label='Tenkan')
-        ax.plot(plot_df['kijun'].values, color='#ff4500', lw=1.15, label='Kijun')
-        ax.fill_between(range(n), plot_df['senkou_a'].values, plot_df['senkou_b'].values,
-                        where=plot_df['senkou_a'] >= plot_df['senkou_b'], color='#00ff7f', alpha=0.18)
-        ax.fill_between(range(n), plot_df['senkou_a'].values, plot_df['senkou_b'].values,
-                        where=plot_df['senkou_a'] < plot_df['senkou_b'], color='#ff69b4', alpha=0.18)
-
-    if fibs:
-        colors = {'0.0':'#ffffff', '0.236':'#ff6b6b', '0.382':'#ff9f43', '0.5':'#feca57',
-                  '0.618':'#1dd1a1', '0.786':'#54a0ff', '1.0':'#5f27cd'}
-        for k, v in fibs.items():
-            c = colors.get(k, '#aaaaaa')
-            ax.axhline(v, color=c, ls='--', lw=0.95, alpha=0.85)
-            ax.text(n + 1.6, v, f' {k}  {v:.1f}', fontsize=8.5, va='center', color=c, fontweight='bold')
-
+    # NDS markers
     if nds_info:
         last_high = nds_info.get('last_high')
         last_low = nds_info.get('last_low')
         high_idx = nds_info.get('last_high_idx')
         low_idx = nds_info.get('last_low_idx')
         offset = len(df) - n
-
+        
         if last_high and high_idx is not None:
-            x_high = high_idx - offset
-            if 0 <= x_high < n:
-                circle = Circle((x_high, last_high), radius=n*0.012, fill=False, edgecolor='#ff4757', linewidth=2.2, zorder=10)
-                ax.add_patch(circle)
-                ax.text(x_high, last_high + (y_max-y_min)*0.022, "High", fontsize=9, ha='center', color='#ff4757', fontweight='bold')
-
+            xh = high_idx - offset
+            if 0 <= xh < n:
+                ax.scatter([xh], [last_high], marker='o', s=60, facecolors='none', edgecolors='#ff4757', linewidths=1.8, zorder=10)
+                ax.text(xh, last_high*1.008, "H", fontsize=8, ha='center', color='#ff4757', fontweight='bold')
         if last_low and low_idx is not None:
-            x_low = low_idx - offset
-            if 0 <= x_low < n:
-                circle = Circle((x_low, last_low), radius=n*0.012, fill=False, edgecolor='#2ed573', linewidth=2.2, zorder=10)
-                ax.add_patch(circle)
-                ax.text(x_low, last_low - (y_max-y_min)*0.028, "Low", fontsize=9, ha='center', color='#2ed573', fontweight='bold')
-
-        # علامت ضربدر قرمز + قیمت تارگت
-        if bias == "صعودی" and last_high:
-            x_mark = n - 6
-            y_mark = last_high + (last_high - (last_low or last_high*0.98)) * 0.32
-            ax.scatter([x_mark], [y_mark], marker='x', s=190, color='#ff4757', linewidths=2.8, zorder=12)
-            ax.text(x_mark, y_mark + (y_max-y_min)*0.02, f"Target ≈ {y_mark:.0f}", fontsize=8.5, ha='center', color='#ff4757', fontweight='bold')
-        elif bias == "نزولی" and last_low:
-            x_mark = n - 6
-            y_mark = last_low - ((last_high or last_low*1.02) - last_low) * 0.32
-            ax.scatter([x_mark], [y_mark], marker='x', s=190, color='#ff4757', linewidths=2.8, zorder=12)
-            ax.text(x_mark, y_mark - (y_max-y_min)*0.025, f"Target ≈ {y_mark:.0f}", fontsize=8.5, ha='center', color='#ff4757', fontweight='bold')
-
-    ax.set_ylim(y_min, y_max)
+            xl = low_idx - offset
+            if 0 <= xl < n:
+                ax.scatter([xl], [last_low], marker='o', s=60, facecolors='none', edgecolors='#2ed573', linewidths=1.8, zorder=10)
+                ax.text(xl, last_low*0.992, "L", fontsize=8, ha='center', color='#2ed573', fontweight='bold')
+        
+        if bias == "نزولی" and last_low:
+            ym = last_low - (last_high - last_low)*0.28 if last_high else last_low*0.985
+            ax.scatter([n-5], [ym], marker='x', s=140, color='#ff4757', linewidths=2.4, zorder=12)
+            ax.text(n-5, ym*0.992, f"{ym:.0f}", fontsize=8, ha='center', color='#ff4757', fontweight='bold')
+        elif bias == "صعودی" and last_high:
+            ym = last_high + (last_high - last_low)*0.28 if last_low else last_high*1.015
+            ax.scatter([n-5], [ym], marker='x', s=140, color='#ff4757', linewidths=2.4, zorder=12)
+            ax.text(n-5, ym*1.008, f"{ym:.0f}", fontsize=8, ha='center', color='#ff4757', fontweight='bold')
+    
+    ax.set_title(title, color='white', fontsize=13, pad=10)
+    ax.legend(loc='upper left', fontsize=7.5, facecolor='#1a1a1a', edgecolor='#333', labelcolor='white', ncol=3)
+    ax.grid(True, alpha=0.2, color='#444')
     ax.yaxis.tick_right()
-    ax.yaxis.set_major_locator(MaxNLocator(nbins=14))
-    ax.yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
-    ax.tick_params(colors='white', labelsize=9)
-    ax.set_title(title, fontsize=13, pad=12, color='white')
-    ax.legend(loc='upper left', fontsize=8.5, facecolor='#111111', edgecolor='#333333', labelcolor='white')
-    ax.grid(True, alpha=0.25, color='#444444')
-    ax.set_xlim(0, n + 22)
-    for spine in ax.spines.values():
-        spine.set_color('#444444')
-
+    ax.yaxis.set_major_formatter(FormatStrFormatter('%.0f'))
+    ax.set_xlim(0, n+16)
+    
+    # === Volume ===
+    colors_vol = ['#2ed573' if plot_df['close'].iloc[i] >= plot_df['open'].iloc[i] else '#ff4757' for i in range(n)]
+    ax_vol.bar(range(n), plot_df['volume'].values, color=colors_vol, alpha=0.7, width=0.8)
+    ax_vol.plot(plot_df['volume'].rolling(5).mean().values, color='#00bfff', lw=1.0, alpha=0.8)
+    ax_vol.set_ylabel('Vol', color='#aaaaaa', fontsize=8)
+    ax_vol.grid(True, alpha=0.15, color='#444')
+    
+    # === RSI ===
+    ax_rsi.plot(plot_df['rsi'].values, color='#e056fd', lw=1.2)
+    ax_rsi.axhline(70, color='#ff4757', ls='--', lw=0.8, alpha=0.6)
+    ax_rsi.axhline(30, color='#2ed573', ls='--', lw=0.8, alpha=0.6)
+    ax_rsi.axhline(50, color='#888888', ls=':', lw=0.7, alpha=0.5)
+    ax_rsi.set_ylim(0, 100)
+    ax_rsi.set_ylabel('RSI', color='#aaaaaa', fontsize=8)
+    ax_rsi.grid(True, alpha=0.15, color='#444')
+    
+    plt.setp(ax.get_xticklabels(), visible=False)
+    plt.setp(ax_vol.get_xticklabels(), visible=False)
+    
     buf = io.BytesIO()
-    plt.savefig(buf, format='png', bbox_inches='tight', dpi=160, facecolor='black')
+    plt.savefig(buf, format='png', bbox_inches='tight', dpi=155, facecolor='#0d0d0d')
     buf.seek(0)
     plt.close()
     return buf
@@ -502,10 +495,10 @@ async def nds_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await status.edit_text("❌ خطا در دریافت داده.")
             return
 
-        df_4h = add_ichimoku(df_4h)
+        df_4h = add_indicators(df_4h)
         price = float(df_4h['close'].iloc[-1])
         atr = float(calc_atr(df_4h).iloc[-1])
-        rsi = float(safe_rsi(df_4h['close']).iloc[-1])
+        rsi = float(df_4h['rsi'].iloc[-1])
 
         nds_d = analyze_nds(df_1d)
         nds_4h = analyze_nds(df_4h)
@@ -517,21 +510,14 @@ async def nds_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         last_low = nds_4h.get('last_low')
 
         if higher == "صعودی":
-            cont_text = (
-                f"ساختار فعلی **صعودی (HH+HL)** است.\n"
-                f"• ناحیه ادامه حرکت عمدتاً بالای آخرین کف مهم (`{last_low:.1f}`) قرار دارد.\n"
-                f"• تا زمانی که قیمت بالای این کف تثبیت شود، احتمال ادامه حرکت صعودی بیشتر است."
-            )
+            cont_text = f"ساختار **صعودی (HH+HL)** است.\nناحیه ادامه حرکت بالای آخرین کف مهم (`{last_low:.1f}`) قرار دارد."
         elif higher == "نزولی":
-            cont_text = (
-                f"ساختار فعلی **نزولی (LH+LL)** است.\n"
-                f"• ناحیه ادامه حرکت عمدتاً زیر آخرین سقف مهم (`{last_high:.1f}`) قرار دارد.\n"
-                f"• تا زمانی که قیمت زیر این سقف باقی بماند، احتمال ادامه حرکت نزولی بیشتر است."
-            )
+            cont_text = f"ساختار **نزولی (LH+LL)** است.\nناحیه ادامه حرکت زیر آخرین سقف مهم (`{last_high:.1f}`) قرار دارد."
         else:
-            cont_text = "ساختار فعلی رنج یا انتقالی است. تا شکست معتبر یکی از دو سمت، جهت‌گیری ضعیف‌تر است."
+            cont_text = "ساختار رنج یا انتقالی است."
 
-        buf = create_nds_chart(df_4h, f"Kronos NDS | {symbol} | 4H | {higher}", fibs=fibs, nds_info=nds_4h, bias=higher)
+        buf = create_pro_chart(df_4h, f"Kronos NDS | {symbol} | 4H | {higher}",
+                               fibs=fibs, nds_info=nds_4h, bias=higher)
 
         text = (
             f"🧬 **تحلیل ساختار NDS | {symbol}**\n\n"
@@ -581,9 +567,9 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await status.edit_text("❌ خطا در دریافت داده.")
             return
 
-        df_4h = add_ichimoku(df_4h)
+        df_4h = add_indicators(df_4h)
         price = float(df_4h['close'].iloc[-1])
-        rsi = float(safe_rsi(df_4h['close']).iloc[-1])
+        rsi = float(df_4h['rsi'].iloc[-1])
         atr = float(calc_atr(df_4h).iloc[-1])
 
         funding = get_funding_rate(symbol)
@@ -592,22 +578,21 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         nds_15 = analyze_nds(df_15m)
         higher = nds_d['bias'] if nds_d['bias'] != "خنثی" else nds_4h['bias']
 
-        # مونت‌کارلو کوتاه‌مدت (۴ تا ۶ ساعت)
         rets = np.diff(np.log(df_4h['close'].values[-80:]))
         mu, sigma = np.mean(rets), np.std(rets)
         horizon = 2
-        sims = np.array([price * np.exp(np.cumsum(np.random.normal(mu, sigma, horizon))) for _ in range(55)])
+        sims = np.array([price * np.exp(np.cumsum(np.random.normal(mu, sigma, horizon))) for _ in range(50)])
         mean_path = np.mean(sims, axis=0)
 
         short_bias = mean_path[-1] > price
         if higher == "صعودی" and short_bias and rsi < 68:
             direction = "LONG"
             signal = "🟢 LONG"
-            reason = "ساختار NDS بالاتر صعودی + تأیید کوتاه‌مدت مونت‌کارلو"
+            reason = "ساختار NDS بالاتر صعودی + تأیید کوتاه‌مدت"
         elif higher == "نزولی" and not short_bias and rsi > 32:
             direction = "SHORT"
             signal = "🔴 SHORT"
-            reason = "ساختار NDS بالاتر نزولی + تأیید کوتاه‌مدت مونت‌کارلو"
+            reason = "ساختار NDS بالاتر نزولی + تأیید کوتاه‌مدت"
         else:
             direction = None
             signal = "⚪️ صبر"
@@ -627,9 +612,9 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rr = reward_usd / risk_usd if risk_usd > 0 else 0
 
         fibs = calc_fib(df_4h)
-        buf = create_chart(df_4h, f"Kronos | {symbol} | 4H | {higher}",
-                           fibs=fibs, entry=entry, sl=sl, tp=tp,
-                           sims=sims, mean_path=mean_path)
+        buf = create_pro_chart(df_4h, f"Kronos | {symbol} | 4H | {higher}",
+                               fibs=fibs, entry=entry, sl=sl, tp=tp,
+                               sims=sims, mean_path=mean_path)
 
         base = symbol.replace("USDT", "")
         glass = f"https://www.coinglass.com/currencies/{base}/funding-rate"
