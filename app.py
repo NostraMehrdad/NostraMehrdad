@@ -203,63 +203,64 @@ def calculate_dollar_sl_tp(entry, direction, atr, margin=5.0, leverage=8, risk_d
         tp = entry - final_distance * 2.1
     return round(sl, 2), round(tp, 2)
 
-def create_chart(df, title, fibs=None, entry=None, sl=None, tp=None, 
-                 sims=None, mean_path=None, short_horizon=True):
-    """نمودار حرفه‌ای با هاله کوتاه‌مدت (۴-۶ ساعت)"""
+def create_chart(df, title, fibs=None, entry=None, sl=None, tp=None, sims=None, mean_path=None):
     plot_df = df.tail(100).copy()
     n = len(plot_df)
     
     price_min = plot_df['low'].min()
     price_max = plot_df['high'].max()
-    padding = (price_max - price_min) * 0.13
-    y_min = price_min - padding * 1.35
-    y_max = price_max + padding * 0.65
+    padding = (price_max - price_min) * 0.15
+    y_min = price_min - padding * 1.5
+    y_max = price_max + padding * 0.7
 
-    fig, ax = plt.subplots(figsize=(13, 7.2))
+    fig, ax = plt.subplots(figsize=(13.5, 7.5), facecolor='black')
+    ax.set_facecolor('black')
 
-    ax.plot(plot_df['close'].values, color='#1f77b4', lw=1.85, label='قیمت', zorder=5)
-    ax.plot(plot_df['close'].rolling(20).mean().values, color='#9467bd', lw=1.15, label='SMA20', alpha=0.9)
-    ax.plot(plot_df['close'].rolling(50).mean().values, color='#ff7f0e', lw=1.3, label='SMA50')
+    ax.plot(plot_df['close'].values, color='#00bfff', lw=1.9, label='قیمت', zorder=5)
+    ax.plot(plot_df['close'].rolling(20).mean().values, color='#da70d6', lw=1.2, label='SMA20', alpha=0.9)
+    ax.plot(plot_df['close'].rolling(50).mean().values, color='#ffa500', lw=1.35, label='SMA50')
 
     if 'tenkan' in plot_df.columns:
-        ax.plot(plot_df['tenkan'].values, color='#2ca02c', lw=1.1, label='Tenkan', alpha=0.9)
-        ax.plot(plot_df['kijun'].values, color='#d62728', lw=1.1, label='Kijun', alpha=0.9)
+        ax.plot(plot_df['tenkan'].values, color='#32cd32', lw=1.15, label='Tenkan', alpha=0.9)
+        ax.plot(plot_df['kijun'].values, color='#ff4500', lw=1.15, label='Kijun', alpha=0.9)
         ax.fill_between(range(n), plot_df['senkou_a'].values, plot_df['senkou_b'].values,
-                        where=plot_df['senkou_a'] >= plot_df['senkou_b'], color='#90ee90', alpha=0.25)
+                        where=plot_df['senkou_a'] >= plot_df['senkou_b'], color='#00ff7f', alpha=0.18)
         ax.fill_between(range(n), plot_df['senkou_a'].values, plot_df['senkou_b'].values,
-                        where=plot_df['senkou_a'] < plot_df['senkou_b'], color='#ffb6c1', alpha=0.25)
+                        where=plot_df['senkou_a'] < plot_df['senkou_b'], color='#ff69b4', alpha=0.18)
 
     if fibs:
-        colors = {'0.0':'#111','0.236':'#8B0000','0.382':'#FF4500','0.5':'#DAA520',
-                  '0.618':'#228B22','0.786':'#1E90FF','1.0':'#4B0082'}
+        colors = {'0.0':'#ffffff', '0.236':'#ff6b6b', '0.382':'#ff9f43', '0.5':'#feca57',
+                  '0.618':'#1dd1a1', '0.786':'#54a0ff', '1.0':'#5f27cd'}
         for k, v in fibs.items():
-            c = colors.get(k, '#555')
-            ax.axhline(v, color=c, ls='--', lw=0.9, alpha=0.8)
-            ax.text(n + 1.5, v, f' {k} {v:.1f}', fontsize=8, va='center', color=c, fontweight='bold')
+            c = colors.get(k, '#aaaaaa')
+            ax.axhline(v, color=c, ls='--', lw=0.95, alpha=0.85)
+            ax.text(n + 1.6, v, f' {k}  {v:.1f}', fontsize=8.5, va='center', color=c, fontweight='bold')
 
-    # هاله کوتاه‌مدت (۴ تا ۶ ساعت ≈ ۱ تا ۱.۵ کندل ۴ ساعته)
     if sims is not None and mean_path is not None:
         last = n - 1
         horizon = len(mean_path)
-        for s in sims[::3]:
-            ax.plot(range(last, last + horizon), s[:horizon], color='gray', alpha=0.13, lw=0.75)
-        ax.plot(range(last, last + horizon), mean_path, color='#c0392b', lw=2.1, label='پیش‌بینی ۴-۶h', zorder=6)
+        for s in sims[::2]:
+            ax.plot(range(last, last + horizon), s[:horizon], color='#aaaaaa', alpha=0.14, lw=0.8)
+        ax.plot(range(last, last + horizon), mean_path, color='#ff4757', lw=2.2, label='پیش‌بینی ۴-۶h', zorder=6)
 
-    if entry: ax.axhline(entry, color='#3498db', lw=1.35, label=f'Entry {entry:.1f}')
-    if sl: ax.axhline(sl, color='#e74c3c', lw=1.35, label=f'SL {sl:.1f}')
-    if tp: ax.axhline(tp, color='#27ae60', lw=1.35, label=f'TP {tp:.1f}')
+    if entry: ax.axhline(entry, color='#1e90ff', lw=1.5, label=f'Entry {entry:.1f}')
+    if sl: ax.axhline(sl, color='#ff4757', lw=1.5, label=f'SL {sl:.1f}')
+    if tp: ax.axhline(tp, color='#2ed573', lw=1.5, label=f'TP {tp:.1f}')
 
     ax.set_ylim(y_min, y_max)
     ax.yaxis.tick_right()
-    ax.yaxis.set_major_locator(MaxNLocator(nbins=13))
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=14))
     ax.yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
-    ax.set_title(title, fontsize=12.5, pad=10)
-    ax.legend(loc='upper left', fontsize=8, framealpha=0.92)
-    ax.grid(True, alpha=0.28)
-    ax.set_xlim(0, n + 18)
+    ax.tick_params(colors='white', labelsize=9)
+    ax.set_title(title, fontsize=13, pad=12, color='white')
+    ax.legend(loc='upper left', fontsize=8.5, facecolor='#111111', edgecolor='#333333', labelcolor='white')
+    ax.grid(True, alpha=0.25, color='#444444')
+    ax.set_xlim(0, n + 20)
+    for spine in ax.spines.values():
+        spine.set_color('#444444')
 
     buf = io.BytesIO()
-    plt.savefig(buf, format='png', bbox_inches='tight', dpi=142)
+    plt.savefig(buf, format='png', bbox_inches='tight', dpi=160, facecolor='black')
     buf.seek(0)
     plt.close()
     return buf
@@ -270,31 +271,32 @@ def create_nds_chart(df, title, fibs=None, nds_info=None, bias="خنثی"):
     
     price_min = plot_df['low'].min()
     price_max = plot_df['high'].max()
-    padding = (price_max - price_min) * 0.14
-    y_min = price_min - padding * 1.4
-    y_max = price_max + padding * 0.7
+    padding = (price_max - price_min) * 0.16
+    y_min = price_min - padding * 1.55
+    y_max = price_max + padding * 0.75
 
-    fig, ax = plt.subplots(figsize=(13.2, 7.3))
+    fig, ax = plt.subplots(figsize=(13.5, 7.6), facecolor='black')
+    ax.set_facecolor('black')
 
-    ax.plot(plot_df['close'].values, color='#1f77b4', lw=1.85, label='قیمت', zorder=5)
-    ax.plot(plot_df['close'].rolling(20).mean().values, color='#9467bd', lw=1.15, label='SMA20')
-    ax.plot(plot_df['close'].rolling(50).mean().values, color='#ff7f0e', lw=1.3, label='SMA50')
+    ax.plot(plot_df['close'].values, color='#00bfff', lw=1.9, label='قیمت', zorder=5)
+    ax.plot(plot_df['close'].rolling(20).mean().values, color='#da70d6', lw=1.2, label='SMA20')
+    ax.plot(plot_df['close'].rolling(50).mean().values, color='#ffa500', lw=1.35, label='SMA50')
 
     if 'tenkan' in plot_df.columns:
-        ax.plot(plot_df['tenkan'].values, color='#2ca02c', lw=1.1, label='Tenkan')
-        ax.plot(plot_df['kijun'].values, color='#d62728', lw=1.1, label='Kijun')
+        ax.plot(plot_df['tenkan'].values, color='#32cd32', lw=1.15, label='Tenkan')
+        ax.plot(plot_df['kijun'].values, color='#ff4500', lw=1.15, label='Kijun')
         ax.fill_between(range(n), plot_df['senkou_a'].values, plot_df['senkou_b'].values,
-                        where=plot_df['senkou_a'] >= plot_df['senkou_b'], color='#90ee90', alpha=0.25)
+                        where=plot_df['senkou_a'] >= plot_df['senkou_b'], color='#00ff7f', alpha=0.18)
         ax.fill_between(range(n), plot_df['senkou_a'].values, plot_df['senkou_b'].values,
-                        where=plot_df['senkou_a'] < plot_df['senkou_b'], color='#ffb6c1', alpha=0.25)
+                        where=plot_df['senkou_a'] < plot_df['senkou_b'], color='#ff69b4', alpha=0.18)
 
     if fibs:
-        colors = {'0.0':'#111','0.236':'#8B0000','0.382':'#FF4500','0.5':'#DAA520',
-                  '0.618':'#228B22','0.786':'#1E90FF','1.0':'#4B0082'}
+        colors = {'0.0':'#ffffff', '0.236':'#ff6b6b', '0.382':'#ff9f43', '0.5':'#feca57',
+                  '0.618':'#1dd1a1', '0.786':'#54a0ff', '1.0':'#5f27cd'}
         for k, v in fibs.items():
-            c = colors.get(k, '#555')
-            ax.axhline(v, color=c, ls='--', lw=0.9, alpha=0.8)
-            ax.text(n + 1.5, v, f' {k} {v:.1f}', fontsize=8, va='center', color=c, fontweight='bold')
+            c = colors.get(k, '#aaaaaa')
+            ax.axhline(v, color=c, ls='--', lw=0.95, alpha=0.85)
+            ax.text(n + 1.6, v, f' {k}  {v:.1f}', fontsize=8.5, va='center', color=c, fontweight='bold')
 
     if nds_info:
         last_high = nds_info.get('last_high')
@@ -306,39 +308,43 @@ def create_nds_chart(df, title, fibs=None, nds_info=None, bias="خنثی"):
         if last_high and high_idx is not None:
             x_high = high_idx - offset
             if 0 <= x_high < n:
-                circle = Circle((x_high, last_high), radius=n*0.011, fill=False, edgecolor='#c0392b', linewidth=2.1, zorder=10)
+                circle = Circle((x_high, last_high), radius=n*0.012, fill=False, edgecolor='#ff4757', linewidth=2.2, zorder=10)
                 ax.add_patch(circle)
-                ax.text(x_high, last_high + (y_max-y_min)*0.022, "High", fontsize=8.5, ha='center', color='#c0392b', fontweight='bold')
+                ax.text(x_high, last_high + (y_max-y_min)*0.022, "High", fontsize=9, ha='center', color='#ff4757', fontweight='bold')
 
         if last_low and low_idx is not None:
             x_low = low_idx - offset
             if 0 <= x_low < n:
-                circle = Circle((x_low, last_low), radius=n*0.011, fill=False, edgecolor='#27ae60', linewidth=2.1, zorder=10)
+                circle = Circle((x_low, last_low), radius=n*0.012, fill=False, edgecolor='#2ed573', linewidth=2.2, zorder=10)
                 ax.add_patch(circle)
-                ax.text(x_low, last_low - (y_max-y_min)*0.028, "Low", fontsize=8.5, ha='center', color='#27ae60', fontweight='bold')
+                ax.text(x_low, last_low - (y_max-y_min)*0.028, "Low", fontsize=9, ha='center', color='#2ed573', fontweight='bold')
 
+        # علامت ضربدر قرمز + قیمت تارگت
         if bias == "صعودی" and last_high:
-            x_mark = n - 7
-            y_mark = last_high + (last_high - (last_low or last_high*0.98)) * 0.28
-            ax.scatter([x_mark], [y_mark], marker='x', s=170, color='#e74c3c', linewidths=2.6, zorder=12)
-            ax.text(x_mark, y_mark + (y_max-y_min)*0.018, "Cont.", fontsize=8, ha='center', color='#e74c3c', fontweight='bold')
+            x_mark = n - 6
+            y_mark = last_high + (last_high - (last_low or last_high*0.98)) * 0.32
+            ax.scatter([x_mark], [y_mark], marker='x', s=190, color='#ff4757', linewidths=2.8, zorder=12)
+            ax.text(x_mark, y_mark + (y_max-y_min)*0.02, f"Target ≈ {y_mark:.0f}", fontsize=8.5, ha='center', color='#ff4757', fontweight='bold')
         elif bias == "نزولی" and last_low:
-            x_mark = n - 7
-            y_mark = last_low - ((last_high or last_low*1.02) - last_low) * 0.28
-            ax.scatter([x_mark], [y_mark], marker='x', s=170, color='#e74c3c', linewidths=2.6, zorder=12)
-            ax.text(x_mark, y_mark - (y_max-y_min)*0.022, "Cont.", fontsize=8, ha='center', color='#e74c3c', fontweight='bold')
+            x_mark = n - 6
+            y_mark = last_low - ((last_high or last_low*1.02) - last_low) * 0.32
+            ax.scatter([x_mark], [y_mark], marker='x', s=190, color='#ff4757', linewidths=2.8, zorder=12)
+            ax.text(x_mark, y_mark - (y_max-y_min)*0.025, f"Target ≈ {y_mark:.0f}", fontsize=8.5, ha='center', color='#ff4757', fontweight='bold')
 
     ax.set_ylim(y_min, y_max)
     ax.yaxis.tick_right()
-    ax.yaxis.set_major_locator(MaxNLocator(nbins=13))
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=14))
     ax.yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
-    ax.set_title(title, fontsize=12.5, pad=10)
-    ax.legend(loc='upper left', fontsize=8)
-    ax.grid(True, alpha=0.28)
-    ax.set_xlim(0, n + 20)
+    ax.tick_params(colors='white', labelsize=9)
+    ax.set_title(title, fontsize=13, pad=12, color='white')
+    ax.legend(loc='upper left', fontsize=8.5, facecolor='#111111', edgecolor='#333333', labelcolor='white')
+    ax.grid(True, alpha=0.25, color='#444444')
+    ax.set_xlim(0, n + 22)
+    for spine in ax.spines.values():
+        spine.set_color('#444444')
 
     buf = io.BytesIO()
-    plt.savefig(buf, format='png', bbox_inches='tight', dpi=142)
+    plt.savefig(buf, format='png', bbox_inches='tight', dpi=160, facecolor='black')
     buf.seek(0)
     plt.close()
     return buf
@@ -586,14 +592,13 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         nds_15 = analyze_nds(df_15m)
         higher = nds_d['bias'] if nds_d['bias'] != "خنثی" else nds_4h['bias']
 
-        # مونت‌کارلو کوتاه‌مدت (حدود ۱ تا ۱.۵ کندل ۴ ساعته = ۴ تا ۶ ساعت)
+        # مونت‌کارلو کوتاه‌مدت (۴ تا ۶ ساعت)
         rets = np.diff(np.log(df_4h['close'].values[-80:]))
         mu, sigma = np.mean(rets), np.std(rets)
-        horizon = 2          # تقریباً ۸ ساعت روی تایم ۴ ساعته (محافظه‌کارانه ۴-۶ ساعت مفید)
-        sims = np.array([price * np.exp(np.cumsum(np.random.normal(mu, sigma, horizon))) for _ in range(50)])
+        horizon = 2
+        sims = np.array([price * np.exp(np.cumsum(np.random.normal(mu, sigma, horizon))) for _ in range(55)])
         mean_path = np.mean(sims, axis=0)
 
-        # تصمیم با افق کوتاه‌مدت
         short_bias = mean_path[-1] > price
         if higher == "صعودی" and short_bias and rsi < 68:
             direction = "LONG"
@@ -622,7 +627,7 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rr = reward_usd / risk_usd if risk_usd > 0 else 0
 
         fibs = calc_fib(df_4h)
-        buf = create_chart(df_4h, f"Kronos | {symbol} | 4H | {higher}", 
+        buf = create_chart(df_4h, f"Kronos | {symbol} | 4H | {higher}",
                            fibs=fibs, entry=entry, sl=sl, tp=tp,
                            sims=sims, mean_path=mean_path)
 
