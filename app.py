@@ -13,7 +13,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator, FormatStrFormatter
-from matplotlib.patches import Circle
+from matplotlib.patches import Circle, Rectangle
 from matplotlib.gridspec import GridSpec
 
 from flask import Flask
@@ -24,7 +24,7 @@ app_web = Flask(__name__)
 
 @app_web.route('/')
 def home():
-    return "Kronos Professional | Saleh-1 is active"
+    return "Kronos Professional | Saleh-2 is active"
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -106,7 +106,6 @@ def fetch_klines(symbol, interval, limit=300):
     return None
 
 def get_funding_info(symbol):
-    """تلاش برای دریافت فاندینگ ریت + زمان بعدی"""
     result = {"rate": None, "next_time": None, "mark": None}
     try:
         url = f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={symbol}"
@@ -182,11 +181,11 @@ def find_nodes(df, mult=1.15, lb=4):
 
 def analyze_nds(df):
     if df is None or len(df) < 60:
-        return {'bias': 'خنثی', 'cycle': '—', 'last_high': None, 'last_low': None, 'last_high_idx': None, 'last_low_idx': None}
+        return {'bias': 'خنثی', 'cycle': '—', 'last_high': None, 'last_low': None, 'last_high_idx': None, 'last_low_idx': None, 'nodes': []}
     nodes = find_nodes(df)
     price = float(df['close'].iloc[-1])
     if len(nodes) < 4:
-        return {'bias': 'خنثی', 'cycle': 'ناقص', 'last_high': None, 'last_low': None, 'last_high_idx': None, 'last_low_idx': None}
+        return {'bias': 'خنثی', 'cycle': 'ناقص', 'last_high': None, 'last_low': None, 'last_high_idx': None, 'last_low_idx': None, 'nodes': nodes}
     
     highs = [n for n in nodes if n['type'] == 'high']
     lows = [n for n in nodes if n['type'] == 'low']
@@ -209,7 +208,8 @@ def analyze_nds(df):
     return {
         'bias': bias, 'cycle': cycle,
         'last_high': last_high, 'last_low': last_low,
-        'last_high_idx': last_high_idx, 'last_low_idx': last_low_idx
+        'last_high_idx': last_high_idx, 'last_low_idx': last_low_idx,
+        'nodes': nodes
     }
 
 def calculate_dollar_sl_tp(entry, direction, atr, margin=5.0, leverage=8, risk_dollar=0.8):
@@ -226,7 +226,7 @@ def calculate_dollar_sl_tp(entry, direction, atr, margin=5.0, leverage=8, risk_d
     return round(sl, 2), round(tp, 2)
 
 def create_pro_chart(df, title, fibs=None, entry=None, sl=None, tp=None, 
-                     sims=None, mean_path=None, nds_info=None, bias=None):
+                     sims=None, mean_path=None, nds_info=None, bias=None, mark_hugs=False):
     plot_df = df.tail(100).copy()
     n = len(plot_df)
     
@@ -273,31 +273,49 @@ def create_pro_chart(df, title, fibs=None, entry=None, sl=None, tp=None,
     if sl: ax.axhline(sl, color='#ff4757', lw=1.4, label='SL')
     if tp: ax.axhline(tp, color='#2ed573', lw=1.4, label='TP')
     
+    # هاله سفید
     if sims is not None and mean_path is not None:
         last = n - 1
         horizon = len(mean_path)
         for s in sims[::3]:
-            ax.plot(range(last, last+horizon), s[:horizon], color='#777777', alpha=0.12, lw=0.7)
-        ax.plot(range(last, last+horizon), mean_path, color='#ff4757', lw=1.9, label='Pred 4-6h', zorder=6)
+            ax.plot(range(last, last+horizon), s[:horizon], color='#ffffff', alpha=0.18, lw=0.8)
+        ax.plot(range(last, last+horizon), mean_path, color='#ffffff', lw=2.0, label='Pred 4-6h', zorder=6)
     
     if nds_info:
         last_high = nds_info.get('last_high')
         last_low = nds_info.get('last_low')
         high_idx = nds_info.get('last_high_idx')
         low_idx = nds_info.get('last_low_idx')
+        nodes = nds_info.get('nodes', [])
         offset = len(df) - n
         
-        if last_high and high_idx is not None:
-            xh = high_idx - offset
-            if 0 <= xh < n:
-                ax.scatter([xh], [last_high], marker='o', s=60, facecolors='none', edgecolors='#ff4757', linewidths=1.8, zorder=10)
-                ax.text(xh, last_high*1.008, "H", fontsize=8, ha='center', color='#ff4757', fontweight='bold')
-        if last_low and low_idx is not None:
-            xl = low_idx - offset
-            if 0 <= xl < n:
-                ax.scatter([xl], [last_low], marker='o', s=60, facecolors='none', edgecolors='#2ed573', linewidths=1.8, zorder=10)
-                ax.text(xl, last_low*0.992, "L", fontsize=8, ha='center', color='#2ed573', fontweight='bold')
+        # علامت‌گذاری Hug / Flag با مربع رنگی
+        if mark_hugs and nodes:
+            recent_nodes = nodes[-6:] if len(nodes) >= 6 else nodes
+            hug_count = 0
+            flag_count = 0
+            for i, node in enumerate(recent_nodes):
+                x = node['index'] - offset
+                if not (0 <= x < n):
+                    continue
+                y = node['price']
+                if node['type'] == 'high':
+                    hug_count += 1
+                    color = '#ff6b6b'
+                    label = f"H{hug_count}"
+                else:
+                    flag_count += 1
+                    color = '#1dd1a1'
+                    label = f"F{flag_count}"
+                
+                # مربع کوچک
+                size = n * 0.008
+                rect = Rectangle((x - size/2, y - (y*0.004)), size, y*0.008, 
+                                 linewidth=1.5, edgecolor=color, facecolor=color, alpha=0.85, zorder=11)
+                ax.add_patch(rect)
+                ax.text(x, y + (y*0.012), label, fontsize=7.5, ha='center', color=color, fontweight='bold', zorder=12)
         
+        # علامت ادامه حرکت
         if bias == "نزولی" and last_low:
             ym = last_low - (last_high - last_low)*0.28 if last_high else last_low*0.985
             ax.scatter([n-5], [ym], marker='x', s=140, color='#ff4757', linewidths=2.4, zorder=12)
@@ -342,7 +360,7 @@ def create_pro_chart(df, title, fibs=None, entry=None, sl=None, tp=None,
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_private(update): return
     await update.message.reply_text(
-        "🤖 **Kronos | دستیار جامع ترید** (صالح ۱)\n\n"
+        "🤖 **Kronos | دستیار جامع ترید** (صالح ۲)\n\n"
         "`/predict`  `/nds`\n"
         "`/buy`  `/status`\n"
         "`/log`  `/performance`\n"
@@ -504,15 +522,19 @@ async def nds_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         last_high = nds_4h.get('last_high')
         last_low = nds_4h.get('last_low')
 
+        # حمایت و مقاومت
+        resistance = last_high
+        support = last_low
+
         if higher == "صعودی":
-            cont_text = f"ساختار **صعودی (HH+HL)** است.\nناحیه ادامه حرکت بالای آخرین کف مهم (`{last_low:.1f}`) قرار دارد."
+            cont_text = f"ساختار **صعودی (HH+HL)** است.\nناحیه ادامه حرکت بالای حمایت مهم (`{support:.1f}`) قرار دارد."
         elif higher == "نزولی":
-            cont_text = f"ساختار **نزولی (LH+LL)** است.\nناحیه ادامه حرکت زیر آخرین سقف مهم (`{last_high:.1f}`) قرار دارد."
+            cont_text = f"ساختار **نزولی (LH+LL)** است.\nناحیه ادامه حرکت زیر مقاومت مهم (`{resistance:.1f}`) قرار دارد."
         else:
             cont_text = "ساختار رنج یا انتقالی است."
 
         buf = create_pro_chart(df_4h, f"Kronos NDS | {symbol} | 4H | {higher}",
-                               fibs=fibs, nds_info=nds_4h, bias=higher)
+                               fibs=fibs, nds_info=nds_4h, bias=higher, mark_hugs=True)
 
         text = (
             f"🧬 **تحلیل ساختار NDS | {symbol}**\n\n"
@@ -520,10 +542,10 @@ async def nds_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• روزانه: {nds_d['cycle']} → **{nds_d['bias']}**\n"
             f"• ۴ ساعته: {nds_4h['cycle']} → **{nds_4h['bias']}**\n"
             f"• ۱۵ دقیقه: {nds_15['cycle']} → **{nds_15['bias']}**\n\n"
-            f"**سطوح کلیدی**\n"
+            f"**حمایت و مقاومت**\n"
         )
-        if last_high: text += f"• آخرین سقف: `{last_high:.1f}`\n"
-        if last_low: text += f"• آخرین کف: `{last_low:.1f}`\n"
+        if resistance: text += f"• مقاومت مهم: `{resistance:.1f}`\n"
+        if support: text += f"• حمایت مهم: `{support:.1f}`\n"
         text += f"\n**نواحی ادامه حرکت**\n{cont_text}\n\n"
         text += f"RSI: `{rsi:.1f}` | ATR: `{atr:.2f}` | قیمت: `{price:.2f}`"
 
@@ -670,7 +692,7 @@ def main():
     app.add_handler(CommandHandler("adduser", adduser))
     app.add_handler(CommandHandler("removeuser", removeuser))
     app.add_handler(CommandHandler("listusers", listusers))
-    print("Kronos صالح ۱ آماده است")
+    print("Kronos صالح ۲ آماده است")
     app.run_polling()
 
 if __name__ == '__main__':
