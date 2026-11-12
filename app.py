@@ -42,7 +42,7 @@ POSITION_FILE = "position.json"
 
 DEFAULT_MARGIN = 5.0
 DEFAULT_LEVERAGE = 8
-RISK_PER_TRADE = 0.5          # ریسک محافظه‌کارانه‌تر (۰.۵ دلار)
+RISK_PER_TRADE = 0.5
 RATE_LIMIT_SECONDS = 40
 
 HEADERS = {
@@ -90,8 +90,6 @@ def check_rate(uid):
 
 def is_private(update): return update.effective_chat.type == "private"
 
-# ===================== مدیریت پوزیشن =====================
-
 def get_open_position(uid):
     data = load_json(POSITION_FILE)
     return data.get(str(uid))
@@ -115,8 +113,6 @@ def close_position(uid):
         save_json(POSITION_FILE, data)
         return True
     return False
-
-# ===================== داده و اندیکاتور =====================
 
 def fetch_klines(symbol, interval, limit=300):
     url = f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
@@ -242,13 +238,9 @@ def analyze_nds(df):
     }
 
 def calculate_dollar_sl_tp(entry, direction, atr, margin=5.0, leverage=8, risk_dollar=0.5):
-    """مدیریت سرمایه محافظه‌کارانه"""
     position_size = margin * leverage
-    # فاصله بر اساس ریسک دلاری ثابت
     price_risk = (risk_dollar / position_size) * entry
-    # فاصله ATR با ضریب کمتر
     atr_distance = atr * 1.25
-    # اولویت با ریسک دلاری (سخت‌گیرانه)
     final_distance = min(price_risk * 1.15, atr_distance) if atr_distance > 0 else price_risk
     
     if direction == "LONG":
@@ -389,8 +381,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🤖 **𓄂 ηοsτrαμεhrδαδ𓆃 | Kronos**\n\n"
         "`/predict`  `/nds`\n"
         "`/position`  `/close`\n"
-        "`/buy`  `/status`\n"
         "`/log`  `/performance`\n"
+        "`/buy`  `/status`\n"
         "`/tools`",
         parse_mode="Markdown"
     )
@@ -471,28 +463,48 @@ async def log_trade(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ دسترسی ندارید.")
         return
     if len(context.args) < 4:
-        await update.message.reply_text("`/log نماد جهت ورود خروج [pnl]`")
+        await update.message.reply_text(
+            "فرمت:\n`/log نماد جهت ورود خروج [pnl] [یادداشت]`\n\n"
+            "مثال:\n`/log BTCUSDT SHORT 74000 72000 1.5 سیگنال خوب بود`",
+            parse_mode="Markdown"
+        )
         return
     try:
         symbol = context.args[0].upper()
         direction = context.args[1].upper()
         entry = float(context.args[2])
         exit_p = float(context.args[3])
-        pnl = float(context.args[4]) if len(context.args)>4 else 0.0
+        pnl = 0.0
+        note = ""
+        
+        if len(context.args) >= 5:
+            try:
+                pnl = float(context.args[4])
+                note = " ".join(context.args[5:]) if len(context.args) > 5 else ""
+            except:
+                note = " ".join(context.args[4:])
+        
         journal = load_json(JOURNAL_FILE)
         trades = journal.get(str(uid), [])
         trades.append({
             "time": datetime.now(timezone.utc).isoformat(),
-            "symbol": symbol, "direction": direction,
-            "entry": entry, "exit": exit_p, "pnl": pnl
+            "symbol": symbol,
+            "direction": direction,
+            "entry": entry,
+            "exit": exit_p,
+            "pnl": pnl,
+            "note": note
         })
         journal[str(uid)] = trades
         save_json(JOURNAL_FILE, journal)
-        # اگر پوزیشن باز بود، آن را هم ببند
         close_position(uid)
-        await update.message.reply_text("✅ ثبت شد و پوزیشن بسته شد.")
-    except:
-        await update.message.reply_text("فرمت اشتباه.")
+        
+        msg = f"✅ معامله ثبت شد.\n`{symbol}` | {direction} | PnL: `{pnl}`"
+        if note:
+            msg += f"\nیادداشت: {note}"
+        await update.message.reply_text(msg, parse_mode="Markdown")
+    except Exception as e:
+        await update.message.reply_text(f"خطا در ثبت: {str(e)[:80]}")
 
 async def performance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_private(update): return
@@ -504,15 +516,33 @@ async def performance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not trades:
         await update.message.reply_text("معامله‌ای ثبت نشده.")
         return
+    
     total = len(trades)
-    pnls = [t.get("pnl", 0) for t in trades]
+    pnls = [float(t.get("pnl", 0)) for t in trades]
     wins = [p for p in pnls if p > 0]
-    winrate = (len(wins)/total*100) if total else 0
+    losses = [p for p in pnls if p < 0]
+    
+    win_count = len(wins)
+    loss_count = len(losses)
+    winrate = (win_count / total * 100) if total else 0
     total_pnl = sum(pnls)
-    await update.message.reply_text(
-        f"📊 **عملکرد**\nتعداد: `{total}`\nوین‌ریت: `{winrate:.1f}%`\nمجموع PnL: `{total_pnl:.2f}`",
-        parse_mode="Markdown"
+    avg_win = sum(wins) / win_count if win_count else 0
+    avg_loss = sum(losses) / loss_count if loss_count else 0
+    best = max(pnls) if pnls else 0
+    worst = min(pnls) if pnls else 0
+    
+    text = (
+        f"📊 **گزارش عملکرد ژورنال**\n\n"
+        f"تعداد کل معاملات: `{total}`\n"
+        f"برد: `{win_count}` | باخت: `{loss_count}`\n"
+        f"وین‌ریت: `{winrate:.1f}%`\n\n"
+        f"مجموع PnL: `{total_pnl:.2f}`\n"
+        f"میانگین سود: `{avg_win:.2f}`\n"
+        f"میانگین ضرر: `{avg_loss:.2f}`\n\n"
+        f"بهترین معامله: `{best:.2f}`\n"
+        f"بدترین معامله: `{worst:.2f}`"
     )
+    await update.message.reply_text(text, parse_mode="Markdown")
 
 async def position_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_private(update): return
@@ -622,7 +652,6 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ دسترسی ندارید.")
         return
 
-    # بررسی محدودیت یک پوزیشن
     open_pos = get_open_position(uid)
     if open_pos:
         await update.message.reply_text(
@@ -732,7 +761,6 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await update.message.reply_photo(photo=buf, caption=plan, parse_mode="Markdown")
 
-        # اگر سیگنال قوی بود، پوزیشن را ثبت کن
         if is_strong and direction:
             set_open_position(uid, symbol, direction, entry, sl, tp)
             await update.message.reply_text(
