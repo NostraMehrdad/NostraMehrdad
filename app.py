@@ -24,7 +24,7 @@ app_web = Flask(__name__)
 
 @app_web.route('/')
 def home():
-    return "Kronos Professional is active"
+    return "Kronos Professional | Saleh-1 is active"
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -105,15 +105,22 @@ def fetch_klines(symbol, interval, limit=300):
         print("Fetch error:", e)
     return None
 
-def get_funding_rate(symbol):
+def get_funding_info(symbol):
+    """تلاش برای دریافت فاندینگ ریت + زمان بعدی"""
+    result = {"rate": None, "next_time": None, "mark": None}
     try:
         url = f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={symbol}"
-        r = requests.get(url, headers=HEADERS, timeout=8)
+        r = requests.get(url, headers=HEADERS, timeout=9)
         if r.status_code == 200:
-            return float(r.json().get('lastFundingRate', 0)) * 100
-    except:
-        pass
-    return None
+            d = r.json()
+            result["rate"] = float(d.get("lastFundingRate", 0)) * 100
+            result["mark"] = float(d.get("markPrice", 0))
+            next_ts = d.get("nextFundingTime")
+            if next_ts:
+                result["next_time"] = datetime.fromtimestamp(int(next_ts)/1000, tz=timezone.utc).strftime("%H:%M UTC")
+    except Exception as e:
+        print("Funding error:", e)
+    return result
 
 def safe_rsi(series, period=14):
     delta = series.diff()
@@ -138,13 +145,11 @@ def add_indicators(df):
     df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
     df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
     
-    # Bollinger
     df['bb_mid'] = df['close'].rolling(20).mean()
     df['bb_std'] = df['close'].rolling(20).std()
     df['bb_upper'] = df['bb_mid'] + 2 * df['bb_std']
     df['bb_lower'] = df['bb_mid'] - 2 * df['bb_std']
     
-    # Ichimoku
     df['tenkan'] = (df['high'].rolling(9).max() + df['low'].rolling(9).min()) / 2
     df['kijun'] = (df['high'].rolling(26).max() + df['low'].rolling(26).min()) / 2
     df['senkou_a'] = ((df['tenkan'] + df['kijun']) / 2).shift(26)
@@ -222,7 +227,6 @@ def calculate_dollar_sl_tp(entry, direction, atr, margin=5.0, leverage=8, risk_d
 
 def create_pro_chart(df, title, fibs=None, entry=None, sl=None, tp=None, 
                      sims=None, mean_path=None, nds_info=None, bias=None):
-    """نمودار حرفه‌ای با Volume و RSI"""
     plot_df = df.tail(100).copy()
     n = len(plot_df)
     
@@ -239,7 +243,6 @@ def create_pro_chart(df, title, fibs=None, entry=None, sl=None, tp=None,
         for spine in a.spines.values():
             spine.set_color('#333333')
     
-    # === قیمت و اندیکاتورها ===
     ax.plot(plot_df['close'].values, color='#00bfff', lw=1.7, label='Price', zorder=5)
     ax.plot(plot_df['sma20'].values, color='#da70d6', lw=1.1, label='MA20', alpha=0.9)
     ax.plot(plot_df['sma50'].values, color='#ffa500', lw=1.2, label='MA50')
@@ -248,19 +251,16 @@ def create_pro_chart(df, title, fibs=None, entry=None, sl=None, tp=None,
     ax.plot(plot_df['ema20'].values, color='#00fa9a', lw=1.0, label='EMA20', alpha=0.85)
     ax.plot(plot_df['ema50'].values, color='#ff6347', lw=1.05, label='EMA50', alpha=0.85)
     
-    # Bollinger
     ax.plot(plot_df['bb_upper'].values, color='#888888', lw=0.9, ls='--', alpha=0.7)
     ax.plot(plot_df['bb_lower'].values, color='#888888', lw=0.9, ls='--', alpha=0.7)
     ax.fill_between(range(n), plot_df['bb_upper'].values, plot_df['bb_lower'].values, color='#444444', alpha=0.15)
     
-    # Ichimoku cloud
     if 'senkou_a' in plot_df.columns:
         ax.fill_between(range(n), plot_df['senkou_a'].values, plot_df['senkou_b'].values,
                         where=plot_df['senkou_a'] >= plot_df['senkou_b'], color='#00ff7f', alpha=0.12)
         ax.fill_between(range(n), plot_df['senkou_a'].values, plot_df['senkou_b'].values,
                         where=plot_df['senkou_a'] < plot_df['senkou_b'], color='#ff69b4', alpha=0.12)
     
-    # Fibonacci
     if fibs:
         colors = {'0.0':'#ffffff', '0.236':'#ff6b6b', '0.382':'#ff9f43', '0.5':'#feca57',
                   '0.618':'#1dd1a1', '0.786':'#54a0ff', '1.0':'#a55eea'}
@@ -269,12 +269,10 @@ def create_pro_chart(df, title, fibs=None, entry=None, sl=None, tp=None,
             ax.axhline(v, color=c, ls=':', lw=0.9, alpha=0.8)
             ax.text(n + 1.2, v, f'{k} {v:.0f}', fontsize=7.5, va='center', color=c)
     
-    # سطوح سیگنال
-    if entry: ax.axhline(entry, color='#1e90ff', lw=1.4, label=f'Entry')
-    if sl: ax.axhline(sl, color='#ff4757', lw=1.4, label=f'SL')
-    if tp: ax.axhline(tp, color='#2ed573', lw=1.4, label=f'TP')
+    if entry: ax.axhline(entry, color='#1e90ff', lw=1.4, label='Entry')
+    if sl: ax.axhline(sl, color='#ff4757', lw=1.4, label='SL')
+    if tp: ax.axhline(tp, color='#2ed573', lw=1.4, label='TP')
     
-    # مونت‌کارلو کوتاه
     if sims is not None and mean_path is not None:
         last = n - 1
         horizon = len(mean_path)
@@ -282,7 +280,6 @@ def create_pro_chart(df, title, fibs=None, entry=None, sl=None, tp=None,
             ax.plot(range(last, last+horizon), s[:horizon], color='#777777', alpha=0.12, lw=0.7)
         ax.plot(range(last, last+horizon), mean_path, color='#ff4757', lw=1.9, label='Pred 4-6h', zorder=6)
     
-    # NDS markers
     if nds_info:
         last_high = nds_info.get('last_high')
         last_low = nds_info.get('last_low')
@@ -317,14 +314,12 @@ def create_pro_chart(df, title, fibs=None, entry=None, sl=None, tp=None,
     ax.yaxis.set_major_formatter(FormatStrFormatter('%.0f'))
     ax.set_xlim(0, n+16)
     
-    # === Volume ===
     colors_vol = ['#2ed573' if plot_df['close'].iloc[i] >= plot_df['open'].iloc[i] else '#ff4757' for i in range(n)]
     ax_vol.bar(range(n), plot_df['volume'].values, color=colors_vol, alpha=0.7, width=0.8)
     ax_vol.plot(plot_df['volume'].rolling(5).mean().values, color='#00bfff', lw=1.0, alpha=0.8)
     ax_vol.set_ylabel('Vol', color='#aaaaaa', fontsize=8)
     ax_vol.grid(True, alpha=0.15, color='#444')
     
-    # === RSI ===
     ax_rsi.plot(plot_df['rsi'].values, color='#e056fd', lw=1.2)
     ax_rsi.axhline(70, color='#ff4757', ls='--', lw=0.8, alpha=0.6)
     ax_rsi.axhline(30, color='#2ed573', ls='--', lw=0.8, alpha=0.6)
@@ -347,7 +342,7 @@ def create_pro_chart(df, title, fibs=None, entry=None, sl=None, tp=None,
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_private(update): return
     await update.message.reply_text(
-        "🤖 **Kronos | دستیار جامع ترید**\n\n"
+        "🤖 **Kronos | دستیار جامع ترید** (صالح ۱)\n\n"
         "`/predict`  `/nds`\n"
         "`/buy`  `/status`\n"
         "`/log`  `/performance`\n"
@@ -572,7 +567,10 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rsi = float(df_4h['rsi'].iloc[-1])
         atr = float(calc_atr(df_4h).iloc[-1])
 
-        funding = get_funding_rate(symbol)
+        funding_info = get_funding_info(symbol)
+        funding = funding_info["rate"]
+        next_fund = funding_info["next_time"]
+
         nds_d = analyze_nds(df_1d)
         nds_4h = analyze_nds(df_4h)
         nds_15 = analyze_nds(df_15m)
@@ -618,7 +616,13 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         base = symbol.replace("USDT", "")
         glass = f"https://www.coinglass.com/currencies/{base}/funding-rate"
-        fund_text = f"`{funding:.4f}%`" if funding is not None else f"[Coinglass]({glass})"
+
+        if funding is not None:
+            fund_line = f"`{funding:.4f}%`"
+            if next_fund:
+                fund_line += f" | بعدی: `{next_fund}`"
+        else:
+            fund_line = f"[مشاهده در Coinglass]({glass})"
 
         plan = (
             f"📋 **پلن معاملاتی | {symbol}**\n\n"
@@ -628,7 +632,8 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"حد سود: `{tp:.2f}`\n\n"
             f"💵 ریسک: `${risk_usd:.2f}` | سود احتمالی: `${reward_usd:.2f}`\n"
             f"R:R ← `1:{rr:.2f}`\n\n"
-            f"دلیل: {reason}\n\n💰 فاندینگ: {fund_text}"
+            f"دلیل: {reason}\n\n"
+            f"💰 **فاندینگ ریت:** {fund_line}"
         )
         await update.message.reply_photo(photo=buf, caption=plan, parse_mode="Markdown")
 
@@ -665,7 +670,7 @@ def main():
     app.add_handler(CommandHandler("adduser", adduser))
     app.add_handler(CommandHandler("removeuser", removeuser))
     app.add_handler(CommandHandler("listusers", listusers))
-    print("Kronos آماده است")
+    print("Kronos صالح ۱ آماده است")
     app.run_polling()
 
 if __name__ == '__main__':
