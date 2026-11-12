@@ -17,7 +17,7 @@ from matplotlib.patches import Circle, Rectangle
 from matplotlib.gridspec import GridSpec
 
 from flask import Flask
-from telegram import Update
+from telegram import Update, Bot
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 app_web = Flask(__name__)
@@ -39,11 +39,14 @@ SUBSCRIPTION_DAYS = 30
 USERS_FILE = "users.json"
 JOURNAL_FILE = "journal.json"
 POSITION_FILE = "position.json"
+ALERT_STATE_FILE = "alert_state.json"
 
 DEFAULT_MARGIN = 5.0
 DEFAULT_LEVERAGE = 8
 RISK_PER_TRADE = 0.5
-RATE_LIMIT_SECONDS = 40
+RATE_LIMIT_SECONDS = 35
+MONITOR_INTERVAL = 180          # هر ۳ دقیقه یک‌بار بررسی پوزیشن‌ها
+DANGER_PERCENT = 0.35           # اگر ۳۰–۳۵٪ فاصله تا SL باقی مانده باشد هشدار بده
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -111,8 +114,101 @@ def close_position(uid):
     if str(uid) in data:
         del data[str(uid)]
         save_json(POSITION_FILE, data)
+        # پاک کردن وضعیت هشدار
+        alerts = load_json(ALERT_STATE_FILE)
+        if str(uid) in alerts:
+            del alerts[str(uid)]
+            save_json(ALERT_STATE_FILE, alerts)
         return True
     return False
+
+def get_current_price(symbol):
+    try:
+        url = f"https://data-api.binance.vision/api/v3/ticker/price?symbol={symbol}"
+        r = requests.get(url, headers=HEADERS, timeout=8)
+        if r.status_code == 200:
+            return float(r.json()["price"])
+    except:
+        pass
+    return None
+
+# ===================== مانیتورینگ پوزیشن =====================
+
+def monitor_positions(bot: Bot):
+    """بررسی دوره‌ای پوزیشن‌های باز و ارسال هشدار"""
+    while True:
+        try:
+            positions = load_json(POSITION_FILE)
+            alerts = load_json(ALERT_STATE_FILE)
+
+            for uid_str, pos in positions.items():
+                try:
+                    uid = int(uid_str)
+                    symbol = pos["symbol"]
+                    direction = pos["direction"]
+                    entry = float(pos["entry"])
+                    sl = float(pos["sl"])
+                    tp = float(pos["tp"])
+
+                    price = get_current_price(symbol)
+                    if price is None:
+                        continue
+
+                    # محاسبه فاصله تا SL و TP
+                    if direction == "LONG":
+                        dist_to_sl = (price - sl) / (entry - sl) if entry != sl else 1
+                        dist_to_tp = (tp - price) / (tp - entry) if tp != entry else 1
+                        danger = price <= entry - (entry - sl) * (1 - DANGER_PERCENT)
+                        near_tp = price >= entry + (tp - entry) * 0.7
+                    else:  # SHORT
+                        dist_to_sl = (sl - price) / (sl - entry) if sl != entry else 1
+                        dist_to_tp = (price - tp) / (entry - tp) if entry != tp else 1
+                        danger = price >= entry + (sl - entry) * (1 - DANGER_PERCENT)
+                        near_tp = price <= entry - (entry - tp) * 0.7
+
+                    user_alerts = alerts.get(uid_str, {})
+
+                    # هشدار نزدیک شدن به حد ضرر
+                    if danger and not user_alerts.get("sl_warned"):
+                        msg = (
+                            f"⚠️ **هشدار محدوده خطر**\n\n"
+                            f"پوزیشن `{symbol}` | {direction}\n"
+                            f"قیمت فعلی: `{price:.2f}`\n"
+                            f"حد ضرر: `{sl:.2f}`\n"
+                            f"قیمت به محدوده خطر نزدیک شده است."
+                        )
+                        try:
+                            bot.send_message(chat_id=uid, text=msg, parse_mode="Markdown")
+                            user_alerts["sl_warned"] = True
+                        except Exception as e:
+                            print("Notify error:", e)
+
+                    # هشدار نزدیک شدن به حد سود
+                    if near_tp and not user_alerts.get("tp_warned"):
+                        msg = (
+                            f"🎯 **نزدیک به حد سود**\n\n"
+                            f"پوزیشن `{symbol}` | {direction}\n"
+                            f"قیمت فعلی: `{price:.2f}`\n"
+                            f"حد سود: `{tp:.2f}`\n"
+                            f"قیمت به تارگت نزدیک شده است."
+                        )
+                        try:
+                            bot.send_message(chat_id=uid, text=msg, parse_mode="Markdown")
+                            user_alerts["tp_warned"] = True
+                        except Exception as e:
+                            print("Notify error:", e)
+
+                    alerts[uid_str] = user_alerts
+
+                except Exception as e:
+                    print("Monitor user error:", e)
+
+            save_json(ALERT_STATE_FILE, alerts)
+
+        except Exception as e:
+            print("Monitor loop error:", e)
+
+        time.sleep(MONITOR_INTERVAL)
 
 def fetch_klines(symbol, interval, limit=300):
     url = f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
@@ -265,20 +361,20 @@ def create_pro_chart(df, title, fibs=None, entry=None, sl=None, tp=None,
     
     for a in [ax, ax_vol, ax_rsi]:
         a.set_facecolor('#0d0d0d')
-        a.tick_params(colors='#cccccc', labelsize=8)
+        a.tick_params(colors='#cccccc', labelsize=7.5)
         for spine in a.spines.values():
             spine.set_color('#333333')
     
-    ax.plot(plot_df['close'].values, color='#00bfff', lw=1.7, label='Price', zorder=5)
-    ax.plot(plot_df['sma20'].values, color='#da70d6', lw=1.1, label='MA20', alpha=0.9)
-    ax.plot(plot_df['sma50'].values, color='#ffa500', lw=1.2, label='MA50')
+    ax.plot(plot_df['close'].values, color='#00bfff', lw=1.6, label='Price', zorder=5)
+    ax.plot(plot_df['sma20'].values, color='#da70d6', lw=1.0, label='MA20', alpha=0.9)
+    ax.plot(plot_df['sma50'].values, color='#ffa500', lw=1.1, label='MA50')
     if 'sma200' in plot_df.columns:
-        ax.plot(plot_df['sma200'].values, color='#1e90ff', lw=1.25, label='MA200', alpha=0.85)
-    ax.plot(plot_df['ema20'].values, color='#00fa9a', lw=1.0, label='EMA20', alpha=0.85)
-    ax.plot(plot_df['ema50'].values, color='#ff6347', lw=1.05, label='EMA50', alpha=0.85)
+        ax.plot(plot_df['sma200'].values, color='#1e90ff', lw=1.15, label='MA200', alpha=0.85)
+    ax.plot(plot_df['ema20'].values, color='#00fa9a', lw=0.95, label='EMA20', alpha=0.85)
+    ax.plot(plot_df['ema50'].values, color='#ff6347', lw=1.0, label='EMA50', alpha=0.85)
     
-    ax.plot(plot_df['bb_upper'].values, color='#888888', lw=0.9, ls='--', alpha=0.7)
-    ax.plot(plot_df['bb_lower'].values, color='#888888', lw=0.9, ls='--', alpha=0.7)
+    ax.plot(plot_df['bb_upper'].values, color='#888888', lw=0.85, ls='--', alpha=0.7)
+    ax.plot(plot_df['bb_lower'].values, color='#888888', lw=0.85, ls='--', alpha=0.7)
     ax.fill_between(range(n), plot_df['bb_upper'].values, plot_df['bb_lower'].values, color='#444444', alpha=0.15)
     
     if 'senkou_a' in plot_df.columns:
@@ -292,19 +388,19 @@ def create_pro_chart(df, title, fibs=None, entry=None, sl=None, tp=None,
                   '0.618':'#1dd1a1', '0.786':'#54a0ff', '1.0':'#a55eea'}
         for k, v in fibs.items():
             c = colors.get(k, '#aaaaaa')
-            ax.axhline(v, color=c, ls=':', lw=0.9, alpha=0.8)
-            ax.text(n + 1.2, v, f'{k} {v:.0f}', fontsize=7.5, va='center', color=c)
+            ax.axhline(v, color=c, ls=':', lw=0.85, alpha=0.8)
+            ax.text(n + 1.2, v, f'{k} {v:.0f}', fontsize=7, va='center', color=c)
     
-    if entry: ax.axhline(entry, color='#1e90ff', lw=1.4, label='Entry')
-    if sl: ax.axhline(sl, color='#ff4757', lw=1.4, label='SL')
-    if tp: ax.axhline(tp, color='#2ed573', lw=1.4, label='TP')
+    if entry: ax.axhline(entry, color='#1e90ff', lw=1.3, label='Entry')
+    if sl: ax.axhline(sl, color='#ff4757', lw=1.3, label='SL')
+    if tp: ax.axhline(tp, color='#2ed573', lw=1.3, label='TP')
     
     if sims is not None and mean_path is not None:
         last = n - 1
         horizon = len(mean_path)
         for s in sims[::3]:
-            ax.plot(range(last, last+horizon), s[:horizon], color='#ffffff', alpha=0.18, lw=0.8)
-        ax.plot(range(last, last+horizon), mean_path, color='#ffffff', lw=2.0, label='Pred 4-6h', zorder=6)
+            ax.plot(range(last, last+horizon), s[:horizon], color='#ffffff', alpha=0.18, lw=0.75)
+        ax.plot(range(last, last+horizon), mean_path, color='#ffffff', lw=1.9, label='Pred 4-6h', zorder=6)
     
     if nds_info:
         last_high = nds_info.get('last_high')
@@ -330,21 +426,21 @@ def create_pro_chart(df, title, fibs=None, entry=None, sl=None, tp=None,
                     label = f"F{flag_count}"
                 size = n * 0.008
                 rect = Rectangle((x - size/2, y - (y*0.004)), size, y*0.008, 
-                                 linewidth=1.5, edgecolor=color, facecolor=color, alpha=0.85, zorder=11)
+                                 linewidth=1.4, edgecolor=color, facecolor=color, alpha=0.85, zorder=11)
                 ax.add_patch(rect)
-                ax.text(x, y + (y*0.012), label, fontsize=7.5, ha='center', color=color, fontweight='bold', zorder=12)
+                ax.text(x, y + (y*0.012), label, fontsize=7, ha='center', color=color, fontweight='bold', zorder=12)
         
         if bias == "نزولی" and last_low:
             ym = last_low - (last_high - last_low)*0.28 if last_high else last_low*0.985
-            ax.scatter([n-5], [ym], marker='x', s=140, color='#ff4757', linewidths=2.4, zorder=12)
-            ax.text(n-5, ym*0.992, f"{ym:.0f}", fontsize=8, ha='center', color='#ff4757', fontweight='bold')
+            ax.scatter([n-5], [ym], marker='x', s=130, color='#ff4757', linewidths=2.3, zorder=12)
+            ax.text(n-5, ym*0.992, f"{ym:.0f}", fontsize=7.5, ha='center', color='#ff4757', fontweight='bold')
         elif bias == "صعودی" and last_high:
             ym = last_high + (last_high - last_low)*0.28 if last_low else last_high*1.015
-            ax.scatter([n-5], [ym], marker='x', s=140, color='#ff4757', linewidths=2.4, zorder=12)
-            ax.text(n-5, ym*1.008, f"{ym:.0f}", fontsize=8, ha='center', color='#ff4757', fontweight='bold')
+            ax.scatter([n-5], [ym], marker='x', s=130, color='#ff4757', linewidths=2.3, zorder=12)
+            ax.text(n-5, ym*1.008, f"{ym:.0f}", fontsize=7.5, ha='center', color='#ff4757', fontweight='bold')
     
-    ax.set_title(title, color='white', fontsize=13, pad=10)
-    ax.legend(loc='upper left', fontsize=7.5, facecolor='#1a1a1a', edgecolor='#333', labelcolor='white', ncol=3)
+    ax.set_title(title, color='white', fontsize=12, pad=9)
+    ax.legend(loc='upper left', fontsize=7, facecolor='#1a1a1a', edgecolor='#333', labelcolor='white', ncol=3)
     ax.grid(True, alpha=0.2, color='#444')
     ax.yaxis.tick_right()
     ax.yaxis.set_major_formatter(FormatStrFormatter('%.0f'))
@@ -353,22 +449,22 @@ def create_pro_chart(df, title, fibs=None, entry=None, sl=None, tp=None,
     colors_vol = ['#2ed573' if plot_df['close'].iloc[i] >= plot_df['open'].iloc[i] else '#ff4757' for i in range(n)]
     ax_vol.bar(range(n), plot_df['volume'].values, color=colors_vol, alpha=0.7, width=0.8)
     ax_vol.plot(plot_df['volume'].rolling(5).mean().values, color='#00bfff', lw=1.0, alpha=0.8)
-    ax_vol.set_ylabel('Vol', color='#aaaaaa', fontsize=8)
+    ax_vol.set_ylabel('Vol', color='#aaaaaa', fontsize=7.5)
     ax_vol.grid(True, alpha=0.15, color='#444')
     
-    ax_rsi.plot(plot_df['rsi'].values, color='#e056fd', lw=1.2)
-    ax_rsi.axhline(70, color='#ff4757', ls='--', lw=0.8, alpha=0.6)
-    ax_rsi.axhline(30, color='#2ed573', ls='--', lw=0.8, alpha=0.6)
-    ax_rsi.axhline(50, color='#888888', ls=':', lw=0.7, alpha=0.5)
+    ax_rsi.plot(plot_df['rsi'].values, color='#e056fd', lw=1.15)
+    ax_rsi.axhline(70, color='#ff4757', ls='--', lw=0.75, alpha=0.6)
+    ax_rsi.axhline(30, color='#2ed573', ls='--', lw=0.75, alpha=0.6)
+    ax_rsi.axhline(50, color='#888888', ls=':', lw=0.65, alpha=0.5)
     ax_rsi.set_ylim(0, 100)
-    ax_rsi.set_ylabel('RSI', color='#aaaaaa', fontsize=8)
+    ax_rsi.set_ylabel('RSI', color='#aaaaaa', fontsize=7.5)
     ax_rsi.grid(True, alpha=0.15, color='#444')
     
     plt.setp(ax.get_xticklabels(), visible=False)
     plt.setp(ax_vol.get_xticklabels(), visible=False)
     
     buf = io.BytesIO()
-    plt.savefig(buf, format='png', bbox_inches='tight', dpi=155, facecolor='#0d0d0d')
+    plt.savefig(buf, format='png', bbox_inches='tight', dpi=150, facecolor='#0d0d0d')
     buf.seek(0)
     plt.close()
     return buf
@@ -554,6 +650,8 @@ async def position_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not pos:
         await update.message.reply_text("📭 هیچ پوزیشن بازی وجود ندارد.")
         return
+
+    price = get_current_price(pos["symbol"])
     text = (
         f"📌 **پوزیشن باز فعلی**\n\n"
         f"نماد: `{pos['symbol']}`\n"
@@ -561,8 +659,15 @@ async def position_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"ورود: `{pos['entry']}`\n"
         f"حد ضرر: `{pos['sl']}`\n"
         f"حد سود: `{pos['tp']}`\n"
-        f"زمان باز شدن: `{pos['opened_at'][:16]}`"
     )
+    if price:
+        text += f"قیمت فعلی: `{price:.2f}`\n"
+        if pos["direction"] == "LONG":
+            pnl_pct = (price - pos["entry"]) / pos["entry"] * 100
+        else:
+            pnl_pct = (pos["entry"] - price) / pos["entry"] * 100
+        text += f"PnL تقریبی: `{pnl_pct:.2f}%`\n"
+    text += f"زمان باز شدن: `{pos['opened_at'][:16]}`"
     await update.message.reply_text(text, parse_mode="Markdown")
 
 async def close_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -636,6 +741,11 @@ async def nds_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += f"\n**نواحی ادامه حرکت**\n{cont_text}\n\n"
         text += f"RSI: `{rsi:.1f}` | ATR: `{atr:.2f}` | قیمت: `{price:.2f}`"
 
+        # اگر پوزیشن باز است، وضعیت آن را هم نشان بده
+        open_pos = get_open_position(uid)
+        if open_pos:
+            text += f"\n\n📌 **پوزیشن باز شما:** `{open_pos['symbol']}` | {open_pos['direction']}"
+
         await update.message.reply_photo(photo=buf, caption=text, parse_mode="Markdown")
         await status.delete()
 
@@ -652,18 +762,6 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ دسترسی ندارید.")
         return
 
-    open_pos = get_open_position(uid)
-    if open_pos:
-        await update.message.reply_text(
-            f"⚠️ **محدودیت مدیریت سرمایه**\n\n"
-            f"شما یک پوزیشن باز دارید:\n"
-            f"`{open_pos['symbol']}` | {open_pos['direction']}\n"
-            f"ورود: `{open_pos['entry']}`\n\n"
-            f"تا زمانی که این پوزیشن را با دستور `/close` نبندید، سیگنال جدید صادر نمی‌شود.",
-            parse_mode="Markdown"
-        )
-        return
-
     args = context.args
     symbol = args[0].upper() if args else "BTCUSDT"
     try:
@@ -672,6 +770,7 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         margin, lev = DEFAULT_MARGIN, DEFAULT_LEVERAGE
 
+    open_pos = get_open_position(uid)
     status = await update.message.reply_text(f"⏳ تحلیل کوتاه‌مدت `{symbol}` ...")
 
     try:
@@ -707,17 +806,17 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if higher == "صعودی" and short_bias and rsi < 68:
             direction = "LONG"
             signal = "🟢 LONG"
-            reason = "ساختار NDS بالاتر صعودی + تأیید کوتاه‌مدت"
+            reason = "ساختار NDS بالاتر صعودی + تأیید کوتاه‌مدت مونت‌کارلو و RSI"
             is_strong = True
         elif higher == "نزولی" and not short_bias and rsi > 32:
             direction = "SHORT"
             signal = "🔴 SHORT"
-            reason = "ساختار NDS بالاتر نزولی + تأیید کوتاه‌مدت"
+            reason = "ساختار NDS بالاتر نزولی + تأیید کوتاه‌مدت مونت‌کارلو و RSI"
             is_strong = True
         else:
             direction = None
             signal = "⚪️ صبر"
-            reason = "عدم تأیید کافی ساختار + افق کوتاه‌مدت"
+            reason = "عدم تأیید کافی ساختار تایم‌فریم بالاتر + افق کوتاه‌مدت"
             is_strong = False
 
         if direction:
@@ -759,14 +858,25 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"دلیل: {reason}\n\n"
             f"💰 **فاندینگ ریت:** {fund_line}"
         )
+
+        if open_pos:
+            plan += f"\n\n📌 شما یک پوزیشن باز دارید (`{open_pos['symbol']}`). فقط تحلیل نمایش داده شد."
+
         await update.message.reply_photo(photo=buf, caption=plan, parse_mode="Markdown")
 
-        if is_strong and direction:
+        # فقط اگر پوزیشن باز نباشد و سیگنال قوی باشد، پیشنهاد باز کردن بده
+        if is_strong and direction and not open_pos:
             set_open_position(uid, symbol, direction, entry, sl, tp)
             await update.message.reply_text(
-                f"🔒 **پوزیشن ثبت شد**\n\n"
-                f"تا زمان بستن این پوزیشن با دستور `/close`، سیگنال جدید صادر نمی‌شود.\n"
-                f"برای مشاهده وضعیت: `/position`",
+                f"🔒 **پوزیشن پیشنهادی ثبت شد**\n\n"
+                f"ربات این پوزیشن را تحت نظر دارد و در صورت نزدیک شدن به محدوده خطر به شما اطلاع می‌دهد.\n"
+                f"برای مشاهده: `/position`\n"
+                f"برای بستن: `/close`",
+                parse_mode="Markdown"
+            )
+        elif open_pos:
+            await update.message.reply_text(
+                "ℹ️ پوزیشن باز دارید. تحلیل انجام شد اما پوزیشن جدید ثبت نشد.",
                 parse_mode="Markdown"
             )
 
@@ -788,25 +898,35 @@ def main():
     if not BOT_TOKEN:
         print("BOT_TOKEN missing")
         return
-    t = threading.Thread(target=run_web, daemon=True)
-    t.start()
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("buy", buy))
-    app.add_handler(CommandHandler("status", status_cmd))
-    app.add_handler(CommandHandler("tools", tools))
-    app.add_handler(CommandHandler("news", news_command))
-    app.add_handler(CommandHandler("predict", predict_command))
-    app.add_handler(CommandHandler("nds", nds_command))
-    app.add_handler(CommandHandler("log", log_trade))
-    app.add_handler(CommandHandler("performance", performance))
-    app.add_handler(CommandHandler("position", position_cmd))
-    app.add_handler(CommandHandler("close", close_cmd))
-    app.add_handler(CommandHandler("adduser", adduser))
-    app.add_handler(CommandHandler("removeuser", removeuser))
-    app.add_handler(CommandHandler("listusers", listusers))
-    print("𓄂 ηοsτrαμεhrδαδ𓆃 آماده است")
-    app.run_polling()
+
+    # وب سرور
+    t_web = threading.Thread(target=run_web, daemon=True)
+    t_web.start()
+
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    # مانیتورینگ پوزیشن‌ها در پس‌زمینه
+    bot_for_monitor = Bot(token=BOT_TOKEN)
+    t_monitor = threading.Thread(target=monitor_positions, args=(bot_for_monitor,), daemon=True)
+    t_monitor.start()
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("buy", buy))
+    application.add_handler(CommandHandler("status", status_cmd))
+    application.add_handler(CommandHandler("tools", tools))
+    application.add_handler(CommandHandler("news", news_command))
+    application.add_handler(CommandHandler("predict", predict_command))
+    application.add_handler(CommandHandler("nds", nds_command))
+    application.add_handler(CommandHandler("log", log_trade))
+    application.add_handler(CommandHandler("performance", performance))
+    application.add_handler(CommandHandler("position", position_cmd))
+    application.add_handler(CommandHandler("close", close_cmd))
+    application.add_handler(CommandHandler("adduser", adduser))
+    application.add_handler(CommandHandler("removeuser", removeuser))
+    application.add_handler(CommandHandler("listusers", listusers))
+
+    print("𓄂 ηοsτrαμεhrδαδ𓆃 آماده است + مانیتورینگ فعال")
+    application.run_polling()
 
 if __name__ == '__main__':
     main()
