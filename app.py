@@ -45,8 +45,11 @@ DEFAULT_MARGIN = 5.0
 DEFAULT_LEVERAGE = 8
 RISK_PER_TRADE = 0.5
 RATE_LIMIT_SECONDS = 35
-MONITOR_INTERVAL = 180          # هر ۳ دقیقه یک‌بار بررسی پوزیشن‌ها
-DANGER_PERCENT = 0.35           # اگر ۳۰–۳۵٪ فاصله تا SL باقی مانده باشد هشدار بده
+MONITOR_INTERVAL = 180
+DANGER_PERCENT = 0.35
+
+# جفت‌ارزهای اصلی برای دستور /market
+MARKET_SYMBOLS = ["BTCUSDT", "ETHUSDT", "XRPUSDT", "SOLUSDT", "BNBUSDT", "DOGEUSDT"]
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -114,7 +117,6 @@ def close_position(uid):
     if str(uid) in data:
         del data[str(uid)]
         save_json(POSITION_FILE, data)
-        # پاک کردن وضعیت هشدار
         alerts = load_json(ALERT_STATE_FILE)
         if str(uid) in alerts:
             del alerts[str(uid)]
@@ -132,10 +134,7 @@ def get_current_price(symbol):
         pass
     return None
 
-# ===================== مانیتورینگ پوزیشن =====================
-
 def monitor_positions(bot: Bot):
-    """بررسی دوره‌ای پوزیشن‌های باز و ارسال هشدار"""
     while True:
         try:
             positions = load_json(POSITION_FILE)
@@ -154,21 +153,15 @@ def monitor_positions(bot: Bot):
                     if price is None:
                         continue
 
-                    # محاسبه فاصله تا SL و TP
                     if direction == "LONG":
-                        dist_to_sl = (price - sl) / (entry - sl) if entry != sl else 1
-                        dist_to_tp = (tp - price) / (tp - entry) if tp != entry else 1
                         danger = price <= entry - (entry - sl) * (1 - DANGER_PERCENT)
                         near_tp = price >= entry + (tp - entry) * 0.7
-                    else:  # SHORT
-                        dist_to_sl = (sl - price) / (sl - entry) if sl != entry else 1
-                        dist_to_tp = (price - tp) / (entry - tp) if entry != tp else 1
+                    else:
                         danger = price >= entry + (sl - entry) * (1 - DANGER_PERCENT)
                         near_tp = price <= entry - (entry - tp) * 0.7
 
                     user_alerts = alerts.get(uid_str, {})
 
-                    # هشدار نزدیک شدن به حد ضرر
                     if danger and not user_alerts.get("sl_warned"):
                         msg = (
                             f"⚠️ **هشدار محدوده خطر**\n\n"
@@ -183,7 +176,6 @@ def monitor_positions(bot: Bot):
                         except Exception as e:
                             print("Notify error:", e)
 
-                    # هشدار نزدیک شدن به حد سود
                     if near_tp and not user_alerts.get("tp_warned"):
                         msg = (
                             f"🎯 **نزدیک به حد سود**\n\n"
@@ -475,7 +467,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_private(update): return
     await update.message.reply_text(
         "🤖 **𓄂 ηοsτrαμεhrδαδ𓆃 | Kronos**\n\n"
-        "`/predict`  `/nds`\n"
+        "`/predict`  `/nds`  `/market`\n"
         "`/position`  `/close`\n"
         "`/log`  `/performance`\n"
         "`/buy`  `/status`\n"
@@ -681,6 +673,55 @@ async def close_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("📭 پوزیشن بازی برای بستن وجود ندارد.")
 
+async def market_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """خلاصه وضعیت NDS چند جفت‌ارز اصلی"""
+    if not is_private(update): return
+    uid = update.effective_user.id
+    if not check_rate(uid):
+        await update.message.reply_text("⏳ کمی صبر کنید.")
+        return
+    if not is_subscribed(uid) and not is_admin(uid):
+        await update.message.reply_text("❌ دسترسی ندارید.")
+        return
+
+    status = await update.message.reply_text("⏳ در حال دریافت وضعیت بازار ...")
+
+    try:
+        lines = ["🌐 **خلاصه وضعیت بازار (NDS)**\n"]
+        
+        for symbol in MARKET_SYMBOLS:
+            try:
+                df_1d = fetch_klines(symbol, "1d", 120)
+                df_4h = fetch_klines(symbol, "4h", 150)
+                
+                if df_1d is None or df_4h is None:
+                    lines.append(f"• `{symbol}`: داده در دسترس نیست")
+                    continue
+                
+                nds_d = analyze_nds(df_1d)
+                nds_4h = analyze_nds(df_4h)
+                higher = nds_d['bias'] if nds_d['bias'] != "خنثی" else nds_4h['bias']
+                
+                price = float(df_4h['close'].iloc[-1])
+                
+                emoji = "🟢" if higher == "صعودی" else "🔴" if higher == "نزولی" else "⚪️"
+                lines.append(
+                    f"{emoji} `{symbol}` → **{higher}** "
+                    f"(روزانه: {nds_d['cycle']} | ۴H: {nds_4h['cycle']}) | قیمت: `{price:.4f}`"
+                )
+            except Exception as e:
+                lines.append(f"• `{symbol}`: خطا")
+        
+        open_pos = get_open_position(uid)
+        if open_pos:
+            lines.append(f"\n📌 پوزیشن باز شما: `{open_pos['symbol']}` | {open_pos['direction']}")
+
+        text = "\n".join(lines)
+        await status.edit_text(text, parse_mode="Markdown")
+
+    except Exception as e:
+        await status.edit_text(f"❌ خطا در دریافت خلاصه بازار: {str(e)[:80]}")
+
 async def nds_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_private(update): return
     uid = update.effective_user.id
@@ -741,7 +782,6 @@ async def nds_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += f"\n**نواحی ادامه حرکت**\n{cont_text}\n\n"
         text += f"RSI: `{rsi:.1f}` | ATR: `{atr:.2f}` | قیمت: `{price:.2f}`"
 
-        # اگر پوزیشن باز است، وضعیت آن را هم نشان بده
         open_pos = get_open_position(uid)
         if open_pos:
             text += f"\n\n📌 **پوزیشن باز شما:** `{open_pos['symbol']}` | {open_pos['direction']}"
@@ -864,7 +904,6 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_photo(photo=buf, caption=plan, parse_mode="Markdown")
 
-        # فقط اگر پوزیشن باز نباشد و سیگنال قوی باشد، پیشنهاد باز کردن بده
         if is_strong and direction and not open_pos:
             set_open_position(uid, symbol, direction, entry, sl, tp)
             await update.message.reply_text(
@@ -899,13 +938,11 @@ def main():
         print("BOT_TOKEN missing")
         return
 
-    # وب سرور
     t_web = threading.Thread(target=run_web, daemon=True)
     t_web.start()
 
     application = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # مانیتورینگ پوزیشن‌ها در پس‌زمینه
     bot_for_monitor = Bot(token=BOT_TOKEN)
     t_monitor = threading.Thread(target=monitor_positions, args=(bot_for_monitor,), daemon=True)
     t_monitor.start()
@@ -917,6 +954,7 @@ def main():
     application.add_handler(CommandHandler("news", news_command))
     application.add_handler(CommandHandler("predict", predict_command))
     application.add_handler(CommandHandler("nds", nds_command))
+    application.add_handler(CommandHandler("market", market_command))
     application.add_handler(CommandHandler("log", log_trade))
     application.add_handler(CommandHandler("performance", performance))
     application.add_handler(CommandHandler("position", position_cmd))
@@ -925,7 +963,7 @@ def main():
     application.add_handler(CommandHandler("removeuser", removeuser))
     application.add_handler(CommandHandler("listusers", listusers))
 
-    print("𓄂 ηοsτrαμεhrδαδ𓆃 آماده است + مانیتورینگ فعال")
+    print("𓄂 ηοsτrαμεhrδαδ𓆃 آماده است + مانیتورینگ + /market")
     application.run_polling()
 
 if __name__ == '__main__':
