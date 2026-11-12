@@ -24,7 +24,7 @@ app_web = Flask(__name__)
 
 @app_web.route('/')
 def home():
-    return "Kronos Professional | Saleh-2 is active"
+    return "𓄂 ηοsτrαμεhrδαδ𓆃 | Kronos Professional is active"
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -38,10 +38,11 @@ SUBSCRIPTION_PRICE = 10
 SUBSCRIPTION_DAYS = 30
 USERS_FILE = "users.json"
 JOURNAL_FILE = "journal.json"
+POSITION_FILE = "position.json"
 
 DEFAULT_MARGIN = 5.0
 DEFAULT_LEVERAGE = 8
-RISK_PER_TRADE = 0.8
+RISK_PER_TRADE = 0.5          # ریسک محافظه‌کارانه‌تر (۰.۵ دلار)
 RATE_LIMIT_SECONDS = 40
 
 HEADERS = {
@@ -88,6 +89,34 @@ def check_rate(uid):
     return True
 
 def is_private(update): return update.effective_chat.type == "private"
+
+# ===================== مدیریت پوزیشن =====================
+
+def get_open_position(uid):
+    data = load_json(POSITION_FILE)
+    return data.get(str(uid))
+
+def set_open_position(uid, symbol, direction, entry, sl, tp):
+    data = load_json(POSITION_FILE)
+    data[str(uid)] = {
+        "symbol": symbol,
+        "direction": direction,
+        "entry": entry,
+        "sl": sl,
+        "tp": tp,
+        "opened_at": datetime.now(timezone.utc).isoformat()
+    }
+    save_json(POSITION_FILE, data)
+
+def close_position(uid):
+    data = load_json(POSITION_FILE)
+    if str(uid) in data:
+        del data[str(uid)]
+        save_json(POSITION_FILE, data)
+        return True
+    return False
+
+# ===================== داده و اندیکاتور =====================
 
 def fetch_klines(symbol, interval, limit=300):
     url = f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
@@ -212,17 +241,22 @@ def analyze_nds(df):
         'nodes': nodes
     }
 
-def calculate_dollar_sl_tp(entry, direction, atr, margin=5.0, leverage=8, risk_dollar=0.8):
+def calculate_dollar_sl_tp(entry, direction, atr, margin=5.0, leverage=8, risk_dollar=0.5):
+    """مدیریت سرمایه محافظه‌کارانه"""
     position_size = margin * leverage
+    # فاصله بر اساس ریسک دلاری ثابت
     price_risk = (risk_dollar / position_size) * entry
-    atr_distance = atr * 1.45
-    final_distance = max(price_risk, atr_distance)
+    # فاصله ATR با ضریب کمتر
+    atr_distance = atr * 1.25
+    # اولویت با ریسک دلاری (سخت‌گیرانه)
+    final_distance = min(price_risk * 1.15, atr_distance) if atr_distance > 0 else price_risk
+    
     if direction == "LONG":
         sl = entry - final_distance
-        tp = entry + final_distance * 2.1
+        tp = entry + final_distance * 2.2
     else:
         sl = entry + final_distance
-        tp = entry - final_distance * 2.1
+        tp = entry - final_distance * 2.2
     return round(sl, 2), round(tp, 2)
 
 def create_pro_chart(df, title, fibs=None, entry=None, sl=None, tp=None, 
@@ -273,7 +307,6 @@ def create_pro_chart(df, title, fibs=None, entry=None, sl=None, tp=None,
     if sl: ax.axhline(sl, color='#ff4757', lw=1.4, label='SL')
     if tp: ax.axhline(tp, color='#2ed573', lw=1.4, label='TP')
     
-    # هاله سفید
     if sims is not None and mean_path is not None:
         last = n - 1
         horizon = len(mean_path)
@@ -284,20 +317,16 @@ def create_pro_chart(df, title, fibs=None, entry=None, sl=None, tp=None,
     if nds_info:
         last_high = nds_info.get('last_high')
         last_low = nds_info.get('last_low')
-        high_idx = nds_info.get('last_high_idx')
-        low_idx = nds_info.get('last_low_idx')
         nodes = nds_info.get('nodes', [])
         offset = len(df) - n
         
-        # علامت‌گذاری Hug / Flag با مربع رنگی
         if mark_hugs and nodes:
             recent_nodes = nodes[-6:] if len(nodes) >= 6 else nodes
             hug_count = 0
             flag_count = 0
-            for i, node in enumerate(recent_nodes):
+            for node in recent_nodes:
                 x = node['index'] - offset
-                if not (0 <= x < n):
-                    continue
+                if not (0 <= x < n): continue
                 y = node['price']
                 if node['type'] == 'high':
                     hug_count += 1
@@ -307,15 +336,12 @@ def create_pro_chart(df, title, fibs=None, entry=None, sl=None, tp=None,
                     flag_count += 1
                     color = '#1dd1a1'
                     label = f"F{flag_count}"
-                
-                # مربع کوچک
                 size = n * 0.008
                 rect = Rectangle((x - size/2, y - (y*0.004)), size, y*0.008, 
                                  linewidth=1.5, edgecolor=color, facecolor=color, alpha=0.85, zorder=11)
                 ax.add_patch(rect)
                 ax.text(x, y + (y*0.012), label, fontsize=7.5, ha='center', color=color, fontweight='bold', zorder=12)
         
-        # علامت ادامه حرکت
         if bias == "نزولی" and last_low:
             ym = last_low - (last_high - last_low)*0.28 if last_high else last_low*0.985
             ax.scatter([n-5], [ym], marker='x', s=140, color='#ff4757', linewidths=2.4, zorder=12)
@@ -360,8 +386,9 @@ def create_pro_chart(df, title, fibs=None, entry=None, sl=None, tp=None,
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_private(update): return
     await update.message.reply_text(
-        "🤖 **Kronos | دستیار جامع ترید** (صالح ۲)\n\n"
+        "🤖 **𓄂 ηοsτrαμεhrδαδ𓆃 | Kronos**\n\n"
         "`/predict`  `/nds`\n"
+        "`/position`  `/close`\n"
         "`/buy`  `/status`\n"
         "`/log`  `/performance`\n"
         "`/tools`",
@@ -461,7 +488,9 @@ async def log_trade(update: Update, context: ContextTypes.DEFAULT_TYPE):
         })
         journal[str(uid)] = trades
         save_json(JOURNAL_FILE, journal)
-        await update.message.reply_text("✅ ثبت شد.")
+        # اگر پوزیشن باز بود، آن را هم ببند
+        close_position(uid)
+        await update.message.reply_text("✅ ثبت شد و پوزیشن بسته شد.")
     except:
         await update.message.reply_text("فرمت اشتباه.")
 
@@ -484,6 +513,38 @@ async def performance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📊 **عملکرد**\nتعداد: `{total}`\nوین‌ریت: `{winrate:.1f}%`\nمجموع PnL: `{total_pnl:.2f}`",
         parse_mode="Markdown"
     )
+
+async def position_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_private(update): return
+    uid = update.effective_user.id
+    if not is_subscribed(uid) and not is_admin(uid):
+        await update.message.reply_text("❌ دسترسی ندارید.")
+        return
+    pos = get_open_position(uid)
+    if not pos:
+        await update.message.reply_text("📭 هیچ پوزیشن بازی وجود ندارد.")
+        return
+    text = (
+        f"📌 **پوزیشن باز فعلی**\n\n"
+        f"نماد: `{pos['symbol']}`\n"
+        f"جهت: **{pos['direction']}**\n"
+        f"ورود: `{pos['entry']}`\n"
+        f"حد ضرر: `{pos['sl']}`\n"
+        f"حد سود: `{pos['tp']}`\n"
+        f"زمان باز شدن: `{pos['opened_at'][:16]}`"
+    )
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+async def close_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_private(update): return
+    uid = update.effective_user.id
+    if not is_subscribed(uid) and not is_admin(uid):
+        await update.message.reply_text("❌ دسترسی ندارید.")
+        return
+    if close_position(uid):
+        await update.message.reply_text("✅ پوزیشن با موفقیت بسته شد.\nحالا می‌توانید سیگنال جدید بگیرید.")
+    else:
+        await update.message.reply_text("📭 پوزیشن بازی برای بستن وجود ندارد.")
 
 async def nds_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_private(update): return
@@ -522,18 +583,14 @@ async def nds_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         last_high = nds_4h.get('last_high')
         last_low = nds_4h.get('last_low')
 
-        # حمایت و مقاومت
-        resistance = last_high
-        support = last_low
-
         if higher == "صعودی":
-            cont_text = f"ساختار **صعودی (HH+HL)** است.\nناحیه ادامه حرکت بالای حمایت مهم (`{support:.1f}`) قرار دارد."
+            cont_text = f"ساختار **صعودی (HH+HL)** است.\nناحیه ادامه حرکت بالای حمایت مهم (`{last_low:.1f}`) قرار دارد."
         elif higher == "نزولی":
-            cont_text = f"ساختار **نزولی (LH+LL)** است.\nناحیه ادامه حرکت زیر مقاومت مهم (`{resistance:.1f}`) قرار دارد."
+            cont_text = f"ساختار **نزولی (LH+LL)** است.\nناحیه ادامه حرکت زیر مقاومت مهم (`{last_high:.1f}`) قرار دارد."
         else:
             cont_text = "ساختار رنج یا انتقالی است."
 
-        buf = create_pro_chart(df_4h, f"Kronos NDS | {symbol} | 4H | {higher}",
+        buf = create_pro_chart(df_4h, f"𓄂 ηοsτrαμεhrδαδ𓆃 | {symbol} | 4H | {higher}",
                                fibs=fibs, nds_info=nds_4h, bias=higher, mark_hugs=True)
 
         text = (
@@ -544,8 +601,8 @@ async def nds_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• ۱۵ دقیقه: {nds_15['cycle']} → **{nds_15['bias']}**\n\n"
             f"**حمایت و مقاومت**\n"
         )
-        if resistance: text += f"• مقاومت مهم: `{resistance:.1f}`\n"
-        if support: text += f"• حمایت مهم: `{support:.1f}`\n"
+        if last_high: text += f"• مقاومت مهم: `{last_high:.1f}`\n"
+        if last_low: text += f"• حمایت مهم: `{last_low:.1f}`\n"
         text += f"\n**نواحی ادامه حرکت**\n{cont_text}\n\n"
         text += f"RSI: `{rsi:.1f}` | ATR: `{atr:.2f}` | قیمت: `{price:.2f}`"
 
@@ -563,6 +620,19 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if not is_subscribed(uid) and not is_admin(uid):
         await update.message.reply_text("❌ دسترسی ندارید.")
+        return
+
+    # بررسی محدودیت یک پوزیشن
+    open_pos = get_open_position(uid)
+    if open_pos:
+        await update.message.reply_text(
+            f"⚠️ **محدودیت مدیریت سرمایه**\n\n"
+            f"شما یک پوزیشن باز دارید:\n"
+            f"`{open_pos['symbol']}` | {open_pos['direction']}\n"
+            f"ورود: `{open_pos['entry']}`\n\n"
+            f"تا زمانی که این پوزیشن را با دستور `/close` نبندید، سیگنال جدید صادر نمی‌شود.",
+            parse_mode="Markdown"
+        )
         return
 
     args = context.args
@@ -609,14 +679,17 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             direction = "LONG"
             signal = "🟢 LONG"
             reason = "ساختار NDS بالاتر صعودی + تأیید کوتاه‌مدت"
+            is_strong = True
         elif higher == "نزولی" and not short_bias and rsi > 32:
             direction = "SHORT"
             signal = "🔴 SHORT"
             reason = "ساختار NDS بالاتر نزولی + تأیید کوتاه‌مدت"
+            is_strong = True
         else:
             direction = None
             signal = "⚪️ صبر"
             reason = "عدم تأیید کافی ساختار + افق کوتاه‌مدت"
+            is_strong = False
 
         if direction:
             sl, tp = calculate_dollar_sl_tp(price, direction, atr, margin, lev, RISK_PER_TRADE)
@@ -632,7 +705,7 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rr = reward_usd / risk_usd if risk_usd > 0 else 0
 
         fibs = calc_fib(df_4h)
-        buf = create_pro_chart(df_4h, f"Kronos | {symbol} | 4H | {higher}",
+        buf = create_pro_chart(df_4h, f"𓄂 ηοsτrαμεhrδαδ𓆃 | {symbol} | 4H | {higher}",
                                fibs=fibs, entry=entry, sl=sl, tp=tp,
                                sims=sims, mean_path=mean_path)
 
@@ -658,6 +731,16 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"💰 **فاندینگ ریت:** {fund_line}"
         )
         await update.message.reply_photo(photo=buf, caption=plan, parse_mode="Markdown")
+
+        # اگر سیگنال قوی بود، پوزیشن را ثبت کن
+        if is_strong and direction:
+            set_open_position(uid, symbol, direction, entry, sl, tp)
+            await update.message.reply_text(
+                f"🔒 **پوزیشن ثبت شد**\n\n"
+                f"تا زمان بستن این پوزیشن با دستور `/close`، سیگنال جدید صادر نمی‌شود.\n"
+                f"برای مشاهده وضعیت: `/position`",
+                parse_mode="Markdown"
+            )
 
         text2 = (
             f"🧬 **NDS**\n"
@@ -689,10 +772,12 @@ def main():
     app.add_handler(CommandHandler("nds", nds_command))
     app.add_handler(CommandHandler("log", log_trade))
     app.add_handler(CommandHandler("performance", performance))
+    app.add_handler(CommandHandler("position", position_cmd))
+    app.add_handler(CommandHandler("close", close_cmd))
     app.add_handler(CommandHandler("adduser", adduser))
     app.add_handler(CommandHandler("removeuser", removeuser))
     app.add_handler(CommandHandler("listusers", listusers))
-    print("Kronos صالح ۲ آماده است")
+    print("𓄂 ηοsτrαμεhrδαδ𓆃 آماده است")
     app.run_polling()
 
 if __name__ == '__main__':
