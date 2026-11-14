@@ -12,13 +12,21 @@ from collections import defaultdict
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from matplotlib.ticker import MaxNLocator, FormatStrFormatter
-from matplotlib.patches import Circle, Rectangle
+from matplotlib.ticker import FormatStrFormatter
+from matplotlib.patches import Rectangle
 from matplotlib.gridspec import GridSpec
 
 from flask import Flask
 from telegram import Update, Bot
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+
+# CCXT برای صرافی‌های معتبر
+try:
+    import ccxt
+    CCXT_AVAILABLE = True
+except ImportError:
+    CCXT_AVAILABLE = False
+    print("⚠️ ccxt نصب نیست. فقط بایننس استفاده می‌شود.")
 
 app_web = Flask(__name__)
 
@@ -162,7 +170,9 @@ def remove_from_watchlist(uid, symbols):
     save_json(WATCHLIST_FILE, data)
     return data[str(uid)]
 
-def get_current_price(symbol):
+# ===================== داده چندصرافی =====================
+
+def get_binance_price(symbol):
     try:
         url = f"https://data-api.binance.vision/api/v3/ticker/price?symbol={symbol}"
         r = requests.get(url, headers=HEADERS, timeout=8)
@@ -171,6 +181,81 @@ def get_current_price(symbol):
     except:
         pass
     return None
+
+def get_multi_exchange_prices(symbol):
+    """
+    قیمت واقعی از چند صرافی معتبر:
+    Binance + Coinbase + Kraken
+    """
+    result = {
+        "binance": None,
+        "coinbase": None,
+        "kraken": None,
+        "consensus": None,
+        "spread_pct": None,
+        "sources_ok": 0
+    }
+
+    # ۱. Binance
+    result["binance"] = get_binance_price(symbol)
+
+    if not CCXT_AVAILABLE:
+        result["consensus"] = result["binance"]
+        result["sources_ok"] = 1 if result["binance"] else 0
+        return result
+
+    base = symbol.replace("USDT", "").replace("USD", "")
+    # فرمت نماد برای صرافی‌های آمریکایی
+    cb_symbol = f"{base}/USD"
+    kr_symbol = f"{base}/USD"
+
+    # ۲. Coinbase
+    try:
+        exchange = ccxt.coinbase({"enableRateLimit": True, "timeout": 10000})
+        ticker = exchange.fetch_ticker(cb_symbol)
+        if ticker and ticker.get("last"):
+            result["coinbase"] = float(ticker["last"])
+    except Exception as e:
+        print("Coinbase error:", e)
+
+    # ۳. Kraken
+    try:
+        exchange = ccxt.kraken({"enableRateLimit": True, "timeout": 10000})
+        ticker = exchange.fetch_ticker(kr_symbol)
+        if ticker and ticker.get("last"):
+            result["kraken"] = float(ticker["last"])
+    except Exception as e:
+        print("Kraken error:", e)
+
+    prices = [p for p in [result["binance"], result["coinbase"], result["kraken"]] if p is not None]
+    result["sources_ok"] = len(prices)
+
+    if prices:
+        result["consensus"] = sum(prices) / len(prices)
+        if len(prices) >= 2:
+            result["spread_pct"] = (max(prices) - min(prices)) / result["consensus"] * 100
+
+    return result
+
+def get_current_price(symbol):
+    """قیمت اجماعی (اولویت با میانگین منابع معتبر)"""
+    multi = get_multi_exchange_prices(symbol)
+    return multi["consensus"] or multi["binance"]
+
+def format_price_sources(multi):
+    """متن خوانا از وضعیت قیمت چندصرافی"""
+    lines = []
+    if multi["binance"]:
+        lines.append(f"Binance: `{multi['binance']:.4f}`")
+    if multi["coinbase"]:
+        lines.append(f"Coinbase: `{multi['coinbase']:.4f}`")
+    if multi["kraken"]:
+        lines.append(f"Kraken: `{multi['kraken']:.4f}`")
+    if multi["consensus"]:
+        lines.append(f"اجماع: `{multi['consensus']:.4f}`")
+    if multi["spread_pct"] is not None and multi["spread_pct"] > 0.15:
+        lines.append(f"⚠️ اختلاف منابع: `{multi['spread_pct']:.3f}%`")
+    return " | ".join(lines) if lines else "قیمت در دسترس نیست"
 
 def monitor_positions(bot: Bot):
     while True:
@@ -495,14 +580,12 @@ async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     base = symbol.replace("USDT", "")
     text = (
         f"📰 **اخبار و افراد تأثیرگذار | {base}**\n\n"
-        f"برای پیگیری سریع نظرات افراد مهم و جریان خبری:\n\n"
         f"• [Coinglass](https://www.coinglass.com)\n"
         f"• [Lookonchain](https://www.lookonchain.com)\n"
         f"• [Arkham](https://www.arkham.com)\n"
         f"• [CryptoPanic](https://cryptopanic.com)\n"
         f"• [CoinMarketCal](https://coinmarketcal.com)\n\n"
-        f"💡 اظهارات افراد تأثیرگذار (مدیران صرافی‌ها، نهنگ‌ها و تحلیل‌گران بزرگ) "
-        f"اغلب باعث حرکت سریع بازار می‌شود. همیشه منابع بالا را همراه با ساختار NDS بررسی کنید."
+        f"💡 اظهارات افراد تأثیرگذار اغلب باعث حرکت سریع بازار می‌شود."
     )
     await update.message.reply_text(text, parse_mode="Markdown", disable_web_page_preview=True)
 
@@ -517,7 +600,7 @@ async def watch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     symbols = [s.upper() for s in context.args]
     result = add_to_watchlist(uid, symbols)
-    await update.message.reply_text(f"✅ واچ‌لیست به‌روز شد:\n`" + "`, `".join(result) + "`", parse_mode="Markdown")
+    await update.message.reply_text(f"✅ واچ‌لیست:\n`" + "`, `".join(result) + "`", parse_mode="Markdown")
 
 async def unwatch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_private(update): return
@@ -528,10 +611,9 @@ async def unwatch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("مثال:\n`/unwatch BTCUSDT`", parse_mode="Markdown")
         return
-    symbols = [s.upper() for s in context.args]
-    result = remove_from_watchlist(uid, symbols)
+    result = remove_from_watchlist(uid, [s.upper() for s in context.args])
     if result:
-        await update.message.reply_text(f"✅ حذف شد. واچ‌لیست فعلی:\n`" + "`, `".join(result) + "`", parse_mode="Markdown")
+        await update.message.reply_text(f"✅ واچ‌لیست فعلی:\n`" + "`, `".join(result) + "`", parse_mode="Markdown")
     else:
         await update.message.reply_text("واچ‌لیست خالی شد.")
 
@@ -543,10 +625,10 @@ async def watchlist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     wl = get_watchlist(uid)
     if not wl:
-        await update.message.reply_text("واچ‌لیست شما خالی است.\nبا `/watch BTCUSDT ETHUSDT` اضافه کنید.")
+        await update.message.reply_text("واچ‌لیست خالی است.\n`/watch BTCUSDT ETHUSDT`")
         return
-    status = await update.message.reply_text("⏳ در حال بررسی واچ‌لیست ...")
-    lines = ["👀 **واچ‌لیست شما**\n"]
+    status = await update.message.reply_text("⏳ بررسی واچ‌لیست ...")
+    lines = ["👀 **واچ‌لیست**\n"]
     for symbol in wl:
         try:
             df_4h = fetch_klines(symbol, "4h", 100)
@@ -554,18 +636,17 @@ async def watchlist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if df_4h is None:
                 lines.append(f"• `{symbol}`: داده نیست")
                 continue
-            nds_d = analyze_nds(df_1d) if df_1d is not None else {'bias': '—', 'cycle': '—'}
+            nds_d = analyze_nds(df_1d) if df_1d is not None else {'bias': '—'}
             nds_4h = analyze_nds(df_4h)
-            higher = nds_d['bias'] if nds_d['bias'] != "خنثی" else nds_4h['bias']
+            higher = nds_d['bias'] if nds_d.get('bias') != "خنثی" else nds_4h['bias']
             price = float(df_4h['close'].iloc[-1])
             emoji = "🟢" if higher == "صعودی" else "🔴" if higher == "نزولی" else "⚪️"
-            lines.append(f"{emoji} `{symbol}` → **{higher}** | قیمت: `{price:.4f}`")
+            lines.append(f"{emoji} `{symbol}` → **{higher}** | `{price:.4f}`")
         except:
             lines.append(f"• `{symbol}`: خطا")
     await status.edit_text("\n".join(lines), parse_mode="Markdown")
 
 async def confirm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """تأیید ثبت پوزیشن معلق"""
     if not is_private(update): return
     uid = update.effective_user.id
     if not is_subscribed(uid) and not is_admin(uid):
@@ -573,10 +654,10 @@ async def confirm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     pending = get_pending_signal(uid)
     if not pending:
-        await update.message.reply_text("هیچ سیگنال معلقی برای تأیید وجود ندارد.")
+        await update.message.reply_text("سیگنال معلقی وجود ندارد.")
         return
     if get_open_position(uid):
-        await update.message.reply_text("⚠️ پوزیشن باز دارید. اول آن را ببندید.")
+        await update.message.reply_text("⚠️ پوزیشن باز دارید. اول ببندید.")
         return
     set_open_position(uid, pending["symbol"], pending["direction"],
                       pending["entry"], pending["sl"], pending["tp"])
@@ -584,10 +665,7 @@ async def confirm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"✅ **پوزیشن ثبت شد**\n\n"
         f"`{pending['symbol']}` | {pending['direction']}\n"
-        f"ورود: `{pending['entry']}`\n"
-        f"حد ضرر: `{pending['sl']}`\n"
-        f"حد سود: `{pending['tp']}`\n\n"
-        f"ربات این پوزیشن را تحت نظر دارد.\n"
+        f"ورود: `{pending['entry']}` | SL: `{pending['sl']}` | TP: `{pending['tp']}`\n\n"
         f"`/position` | `/close`",
         parse_mode="Markdown"
     )
@@ -631,18 +709,14 @@ async def log_trade(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ دسترسی ندارید.")
         return
     if len(context.args) < 4:
-        await update.message.reply_text(
-            "فرمت:\n`/log نماد جهت ورود خروج [pnl] [یادداشت]`",
-            parse_mode="Markdown"
-        )
+        await update.message.reply_text("`/log نماد جهت ورود خروج [pnl] [یادداشت]`", parse_mode="Markdown")
         return
     try:
         symbol = context.args[0].upper()
         direction = context.args[1].upper()
         entry = float(context.args[2])
         exit_p = float(context.args[3])
-        pnl = 0.0
-        note = ""
+        pnl, note = 0.0, ""
         if len(context.args) >= 5:
             try:
                 pnl = float(context.args[4])
@@ -660,7 +734,7 @@ async def log_trade(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_json(JOURNAL_FILE, journal)
         close_position(uid)
         clear_pending_signal(uid)
-        msg = f"✅ معامله ثبت شد.\n`{symbol}` | {direction} | PnL: `{pnl}`"
+        msg = f"✅ ثبت شد.\n`{symbol}` | {direction} | PnL: `{pnl}`"
         if note: msg += f"\nیادداشت: {note}"
         await update.message.reply_text(msg, parse_mode="Markdown")
     except Exception as e:
@@ -688,9 +762,9 @@ async def performance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     best = max(pnls) if pnls else 0
     worst = min(pnls) if pnls else 0
     text = (
-        f"📊 **گزارش عملکرد ژورنال**\n\n"
-        f"تعداد کل: `{total}` | برد: `{win_count}` | باخت: `{loss_count}`\n"
-        f"وین‌ریت: `{winrate:.1f}%`\n\n"
+        f"📊 **عملکرد ژورنال**\n\n"
+        f"کل: `{total}` | برد: `{win_count}` | باخت: `{loss_count}`\n"
+        f"وین‌ریت: `{winrate:.1f}%`\n"
         f"مجموع PnL: `{total_pnl:.2f}`\n"
         f"میانگین سود: `{avg_win:.2f}` | میانگین ضرر: `{avg_loss:.2f}`\n"
         f"بهترین: `{best:.2f}` | بدترین: `{worst:.2f}`"
@@ -705,21 +779,23 @@ async def position_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     pos = get_open_position(uid)
     if not pos:
-        await update.message.reply_text("📭 هیچ پوزیشن بازی وجود ندارد.")
+        await update.message.reply_text("📭 پوزیشن بازی وجود ندارد.")
         return
-    price = get_current_price(pos["symbol"])
+    multi = get_multi_exchange_prices(pos["symbol"])
+    price = multi["consensus"] or multi["binance"]
     text = (
-        f"📌 **پوزیشن باز فعلی**\n\n"
+        f"📌 **پوزیشن باز**\n\n"
         f"نماد: `{pos['symbol']}`\nجهت: **{pos['direction']}**\n"
         f"ورود: `{pos['entry']}`\nحد ضرر: `{pos['sl']}`\nحد سود: `{pos['tp']}`\n"
     )
     if price:
-        text += f"قیمت فعلی: `{price:.2f}`\n"
+        text += f"قیمت فعلی (اجماع): `{price:.2f}`\n"
         if pos["direction"] == "LONG":
             pnl_pct = (price - pos["entry"]) / pos["entry"] * 100
         else:
             pnl_pct = (pos["entry"] - price) / pos["entry"] * 100
         text += f"PnL تقریبی: `{pnl_pct:.2f}%`\n"
+        text += f"منابع: {format_price_sources(multi)}\n"
     text += f"زمان: `{pos['opened_at'][:16]}`"
     await update.message.reply_text(text, parse_mode="Markdown")
 
@@ -731,7 +807,7 @@ async def close_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if close_position(uid):
         clear_pending_signal(uid)
-        await update.message.reply_text("✅ پوزیشن بسته شد. می‌توانید سیگنال جدید بگیرید.")
+        await update.message.reply_text("✅ پوزیشن بسته شد.")
     else:
         await update.message.reply_text("📭 پوزیشن بازی وجود ندارد.")
 
@@ -744,9 +820,9 @@ async def market_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_subscribed(uid) and not is_admin(uid):
         await update.message.reply_text("❌ دسترسی ندارید.")
         return
-    status = await update.message.reply_text("⏳ در حال دریافت وضعیت بازار ...")
+    status = await update.message.reply_text("⏳ وضعیت بازار ...")
     try:
-        lines = ["🌐 **خلاصه وضعیت بازار (NDS)**\n"]
+        lines = ["🌐 **خلاصه بازار (NDS + چندصرافی)**\n"]
         for symbol in MARKET_SYMBOLS:
             try:
                 df_1d = fetch_klines(symbol, "1d", 120)
@@ -757,9 +833,11 @@ async def market_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 nds_d = analyze_nds(df_1d)
                 nds_4h = analyze_nds(df_4h)
                 higher = nds_d['bias'] if nds_d['bias'] != "خنثی" else nds_4h['bias']
-                price = float(df_4h['close'].iloc[-1])
+                multi = get_multi_exchange_prices(symbol)
+                price = multi["consensus"] or float(df_4h['close'].iloc[-1])
                 emoji = "🟢" if higher == "صعودی" else "🔴" if higher == "نزولی" else "⚪️"
-                lines.append(f"{emoji} `{symbol}` → **{higher}** (D:{nds_d['cycle']} | 4H:{nds_4h['cycle']}) | `{price:.4f}`")
+                src = f" ({multi['sources_ok']} منبع)" if multi['sources_ok'] else ""
+                lines.append(f"{emoji} `{symbol}` → **{higher}** | `{price:.4f}`{src}")
             except:
                 lines.append(f"• `{symbol}`: خطا")
         open_pos = get_open_position(uid)
@@ -780,7 +858,7 @@ async def nds_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     args = context.args
     symbol = args[0].upper() if args else "BTCUSDT"
-    status = await update.message.reply_text(f"⏳ تحلیل ساختار NDS `{symbol}` ...")
+    status = await update.message.reply_text(f"⏳ تحلیل NDS `{symbol}` ...")
     try:
         df_4h = fetch_klines(symbol, "4h", 300)
         df_1d = fetch_klines(symbol, "1d", 200)
@@ -789,7 +867,8 @@ async def nds_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await status.edit_text("❌ خطا در دریافت داده.")
             return
         df_4h = add_indicators(df_4h)
-        price = float(df_4h['close'].iloc[-1])
+        multi = get_multi_exchange_prices(symbol)
+        price = multi["consensus"] or float(df_4h['close'].iloc[-1])
         atr = float(calc_atr(df_4h).iloc[-1])
         rsi = float(df_4h['rsi'].iloc[-1])
         nds_d = analyze_nds(df_1d)
@@ -800,28 +879,29 @@ async def nds_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         last_high = nds_4h.get('last_high')
         last_low = nds_4h.get('last_low')
         if higher == "صعودی":
-            cont_text = f"ساختار **صعودی (HH+HL)** است.\nناحیه ادامه حرکت بالای حمایت مهم (`{last_low:.1f}`) قرار دارد."
+            cont_text = f"ساختار **صعودی (HH+HL)**.\nادامه حرکت بالای حمایت (`{last_low:.1f}`)."
         elif higher == "نزولی":
-            cont_text = f"ساختار **نزولی (LH+LL)** است.\nناحیه ادامه حرکت زیر مقاومت مهم (`{last_high:.1f}`) قرار دارد."
+            cont_text = f"ساختار **نزولی (LH+LL)**.\nادامه حرکت زیر مقاومت (`{last_high:.1f}`)."
         else:
-            cont_text = "ساختار رنج یا انتقالی است."
+            cont_text = "ساختار رنج یا انتقالی."
         buf = create_pro_chart(df_4h, f"𓄂 ηοsτrαμεhrδαδ𓆃 | {symbol} | 4H | {higher}",
                                fibs=fibs, nds_info=nds_4h, bias=higher, mark_hugs=True)
         text = (
-            f"🧬 **تحلیل ساختار NDS | {symbol}**\n\n"
+            f"🧬 **NDS | {symbol}**\n\n"
             f"**بایاس غالب:** {higher}\n\n"
             f"• روزانه: {nds_d['cycle']} → **{nds_d['bias']}**\n"
-            f"• ۴ ساعته: {nds_4h['cycle']} → **{nds_4h['bias']}**\n"
-            f"• ۱۵ دقیقه: {nds_15['cycle']} → **{nds_15['bias']}**\n\n"
+            f"• ۴H: {nds_4h['cycle']} → **{nds_4h['bias']}**\n"
+            f"• ۱۵M: {nds_15['cycle']} → **{nds_15['bias']}**\n\n"
             f"**حمایت و مقاومت**\n"
         )
-        if last_high: text += f"• مقاومت مهم: `{last_high:.1f}`\n"
-        if last_low: text += f"• حمایت مهم: `{last_low:.1f}`\n"
-        text += f"\n**نواحی ادامه حرکت**\n{cont_text}\n\n"
-        text += f"RSI: `{rsi:.1f}` | ATR: `{atr:.2f}` | قیمت: `{price:.2f}`"
+        if last_high: text += f"• مقاومت: `{last_high:.1f}`\n"
+        if last_low: text += f"• حمایت: `{last_low:.1f}`\n"
+        text += f"\n{cont_text}\n\n"
+        text += f"RSI: `{rsi:.1f}` | ATR: `{atr:.2f}` | قیمت: `{price:.2f}`\n"
+        text += f"منابع قیمت: {format_price_sources(multi)}"
         open_pos = get_open_position(uid)
         if open_pos:
-            text += f"\n\n📌 **پوزیشن باز شما:** `{open_pos['symbol']}` | {open_pos['direction']}"
+            text += f"\n\n📌 پوزیشن باز: `{open_pos['symbol']}` | {open_pos['direction']}"
         await update.message.reply_photo(photo=buf, caption=text, parse_mode="Markdown")
         await status.delete()
     except Exception as e:
@@ -846,7 +926,7 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         margin, lev = DEFAULT_MARGIN, DEFAULT_LEVERAGE
 
     open_pos = get_open_position(uid)
-    status = await update.message.reply_text(f"⏳ تحلیل کوتاه‌مدت `{symbol}` ...")
+    status = await update.message.reply_text(f"⏳ تحلیل `{symbol}` (چندصرافی) ...")
 
     try:
         df_4h = fetch_klines(symbol, "4h", 250)
@@ -857,7 +937,8 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         df_4h = add_indicators(df_4h)
-        price = float(df_4h['close'].iloc[-1])
+        multi = get_multi_exchange_prices(symbol)
+        price = multi["consensus"] or float(df_4h['close'].iloc[-1])
         rsi = float(df_4h['rsi'].iloc[-1])
         atr = float(calc_atr(df_4h).iloc[-1])
         funding_info = get_funding_info(symbol)
@@ -876,28 +957,17 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         short_bias = mean_path[-1] > price
         if higher == "صعودی" and short_bias and rsi < 68:
-            direction = "LONG"
-            signal = "🟢 LONG"
-            reason = "ساختار NDS بالاتر صعودی + تأیید کوتاه‌مدت مونت‌کارلو و RSI"
-            is_strong = True
+            direction, signal, reason, is_strong = "LONG", "🟢 LONG", "NDS بالاتر صعودی + تأیید کوتاه‌مدت", True
         elif higher == "نزولی" and not short_bias and rsi > 32:
-            direction = "SHORT"
-            signal = "🔴 SHORT"
-            reason = "ساختار NDS بالاتر نزولی + تأیید کوتاه‌مدت مونت‌کارلو و RSI"
-            is_strong = True
+            direction, signal, reason, is_strong = "SHORT", "🔴 SHORT", "NDS بالاتر نزولی + تأیید کوتاه‌مدت", True
         else:
-            direction = None
-            signal = "⚪️ صبر"
-            reason = "عدم تأیید کافی ساختار تایم‌فریم بالاتر + افق کوتاه‌مدت"
-            is_strong = False
+            direction, signal, reason, is_strong = None, "⚪️ صبر", "عدم تأیید کافی ساختار", False
 
         if direction:
             sl, tp = calculate_dollar_sl_tp(price, direction, atr, margin, lev, RISK_PER_TRADE)
             entry = price
         else:
-            entry = price
-            sl = price - atr * 1.25
-            tp = price + atr * 1.25
+            entry, sl, tp = price, price - atr*1.25, price + atr*1.25
 
         position_size = margin * lev
         risk_usd = abs(entry - sl) / entry * position_size
@@ -906,8 +976,7 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         fibs = calc_fib(df_4h)
         buf = create_pro_chart(df_4h, f"𓄂 ηοsτrαμεhrδαδ𓆃 | {symbol} | 4H | {higher}",
-                               fibs=fibs, entry=entry, sl=sl, tp=tp,
-                               sims=sims, mean_path=mean_path)
+                               fibs=fibs, entry=entry, sl=sl, tp=tp, sims=sims, mean_path=mean_path)
 
         base = symbol.replace("USDT", "")
         glass = f"https://www.coinglass.com/currencies/{base}/funding-rate"
@@ -915,43 +984,36 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             fund_line = f"`{funding:.4f}%`"
             if next_fund: fund_line += f" | بعدی: `{next_fund}`"
         else:
-            fund_line = f"[مشاهده در Coinglass]({glass})"
+            fund_line = f"[Coinglass]({glass})"
 
         plan = (
-            f"📋 **پلن معاملاتی | {symbol}**\n\n"
+            f"📋 **پلن | {symbol}**\n\n"
             f"سیگنال: **{signal}**\n"
-            f"ورود: `{entry:.2f}`\nحد ضرر: `{sl:.2f}`\nحد سود: `{tp:.2f}`\n\n"
-            f"💵 ریسک: `${risk_usd:.2f}` | سود احتمالی: `${reward_usd:.2f}`\n"
-            f"R:R ← `1:{rr:.2f}`\n\n"
+            f"ورود: `{entry:.2f}`\nSL: `{sl:.2f}`\nTP: `{tp:.2f}`\n\n"
+            f"💵 ریسک: `${risk_usd:.2f}` | سود: `${reward_usd:.2f}` | R:R `1:{rr:.2f}`\n\n"
             f"دلیل: {reason}\n\n"
-            f"💰 **فاندینگ ریت:** {fund_line}"
+            f"💰 فاندینگ: {fund_line}\n"
+            f"📡 منابع قیمت: {format_price_sources(multi)}"
         )
         if open_pos:
-            plan += f"\n\n📌 پوزیشن باز دارید (`{open_pos['symbol']}`). فقط تحلیل نمایش داده شد."
+            plan += f"\n\n📌 پوزیشن باز دارید (`{open_pos['symbol']}`)."
 
         await update.message.reply_photo(photo=buf, caption=plan, parse_mode="Markdown")
 
-        # جریان تأیید برای سیگنال قوی
         if is_strong and direction and not open_pos:
-            set_pending_signal(uid, {
-                "symbol": symbol, "direction": direction,
-                "entry": entry, "sl": sl, "tp": tp
-            })
+            set_pending_signal(uid, {"symbol": symbol, "direction": direction, "entry": entry, "sl": sl, "tp": tp})
             await update.message.reply_text(
-                f"❓ **سیگنال قوی تشخیص داده شد**\n\n"
-                f"آیا می‌خواهید این پوزیشن ثبت شود؟\n\n"
-                f"برای تأیید بنویسید: `/confirm`\n"
-                f"در غیر این صورت نادیده بگیرید.",
+                f"❓ **سیگنال قوی**\nبرای ثبت بنویسید: `/confirm`",
                 parse_mode="Markdown"
             )
         elif open_pos:
-            await update.message.reply_text("ℹ️ پوزیشن باز دارید. تحلیل انجام شد اما پوزیشن جدید ثبت نشد.")
+            await update.message.reply_text("ℹ️ پوزیشن باز دارید. فقط تحلیل نمایش داده شد.")
 
         text2 = (
-            f"🧬 **NDS**\nبایاس غالب: **{higher}**\n"
+            f"🧬 **NDS**\nبایاس: **{higher}**\n"
             f"• روزانه: {nds_d['cycle']} → {nds_d['bias']}\n"
-            f"• ۴ ساعته: {nds_4h['cycle']} → {nds_4h['bias']}\n"
-            f"• ۱۵ دقیقه: {nds_15['cycle']} → {nds_15['bias']}\n\n"
+            f"• ۴H: {nds_4h['cycle']} → {nds_4h['bias']}\n"
+            f"• ۱۵M: {nds_15['cycle']} → {nds_15['bias']}\n\n"
             f"RSI: `{rsi:.1f}` | ATR: `{atr:.2f}`"
         )
         await update.message.reply_text(text2, parse_mode="Markdown")
@@ -990,7 +1052,7 @@ def main():
     application.add_handler(CommandHandler("removeuser", removeuser))
     application.add_handler(CommandHandler("listusers", listusers))
 
-    print("𓄂 ηοsτrαμεhrδαδ𓆃 آماده است")
+    print("𓄂 ηοsτrαμεhrδαδ𓆃 آماده | چندصرافی فعال")
     application.run_polling()
 
 if __name__ == '__main__':
