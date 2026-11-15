@@ -13,7 +13,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FormatStrFormatter
-from matplotlib.patches import Rectangle
+from matplotlib.patches import Rectangle, Arc, FancyBboxPatch
 from matplotlib.gridspec import GridSpec
 
 from flask import Flask
@@ -58,9 +58,7 @@ RATE_LIMIT_SECONDS = 40
 MONITOR_INTERVAL = 120
 DANGER_PERCENT = 0.35
 PULLBACK_ALERT_PCT = 0.012
-# سخت‌گیری سیگنال
 MIN_SIGNAL_SCORE = 68
-MIN_HIGHER_TF_ALIGN = 3
 
 NDS_INTERVALS = [
     ("5m", "۵ دقیقه"), ("15m", "۱۵ دقیقه"), ("30m", "۳۰ دقیقه"),
@@ -172,14 +170,10 @@ def remove_from_watchlist(uid, symbols):
     save_json(WATCHLIST_FILE, data)
     return data[str(uid)]
 
-# ===================== هشدار قیمت سفارشی =====================
-
 def get_user_price_alerts(uid):
-    data = load_json(PRICE_ALERTS_FILE)
-    return data.get(str(uid), [])
+    return load_json(PRICE_ALERTS_FILE).get(str(uid), [])
 
 def add_price_alert(uid, symbol, target, condition):
-    """condition: above | below"""
     data = load_json(PRICE_ALERTS_FILE)
     alerts = data.get(str(uid), [])
     alerts.append({
@@ -258,7 +252,6 @@ def format_price_sources(multi):
 def monitor_positions(bot: Bot):
     while True:
         try:
-            # --- پوزیشن‌ها ---
             positions = load_json(POSITION_FILE)
             alerts = load_json(ALERT_STATE_FILE)
             for uid_str, pos in list(positions.items()):
@@ -273,10 +266,8 @@ def monitor_positions(bot: Bot):
                     if price is None:
                         continue
                     user_alerts = alerts.get(uid_str, {})
-
                     hit_sl = (direction == "LONG" and price <= sl) or (direction == "SHORT" and price >= sl)
                     hit_tp = (direction == "LONG" and price >= tp) or (direction == "SHORT" and price <= tp)
-
                     if hit_sl:
                         close_position(uid)
                         try:
@@ -295,7 +286,6 @@ def monitor_positions(bot: Bot):
                             ), parse_mode="Markdown")
                         except: pass
                         continue
-
                     if direction == "LONG":
                         danger = price <= entry - (entry - sl) * (1 - DANGER_PERCENT)
                         near_tp = price >= entry + (tp - entry) * 0.7
@@ -304,7 +294,6 @@ def monitor_positions(bot: Bot):
                         danger = price >= entry + (sl - entry) * (1 - DANGER_PERCENT)
                         near_tp = price <= entry - (entry - tp) * 0.7
                         pullback = entry > 0 and (price - entry) / entry >= PULLBACK_ALERT_PCT and price < sl
-
                     if danger and not user_alerts.get("sl_warned"):
                         try:
                             bot.send_message(chat_id=uid, text=f"⚠️ **نزدیک به محدوده خطر**\n\n`{symbol}` | {direction}\nقیمت: `{price:.4f}`\nSL: `{sl:.4f}`", parse_mode="Markdown")
@@ -325,7 +314,6 @@ def monitor_positions(bot: Bot):
                     print("Monitor pos:", e)
             save_json(ALERT_STATE_FILE, alerts)
 
-            # --- هشدارهای قیمت سفارشی ---
             all_alerts = load_json(PRICE_ALERTS_FILE)
             changed = False
             for uid_str, user_alerts_list in list(all_alerts.items()):
@@ -343,11 +331,7 @@ def monitor_positions(bot: Bot):
                             try:
                                 bot.send_message(
                                     chat_id=int(uid_str),
-                                    text=(
-                                        f"🚨 **هشدار قیمت**\n\n"
-                                        f"`{a['symbol']}` به `{price:.4f}` رسید\n"
-                                        f"شرط: {('بالای' if cond=='above' else 'زیر')} `{target:.4f}`"
-                                    ),
+                                    text=(f"🚨 **هشدار قیمت**\n\n`{a['symbol']}` → `{price:.4f}`\nشرط: {('بالای' if cond=='above' else 'زیر')} `{target:.4f}`"),
                                     parse_mode="Markdown"
                                 )
                             except: pass
@@ -360,7 +344,6 @@ def monitor_positions(bot: Bot):
                 all_alerts[uid_str] = remaining
             if changed:
                 save_json(PRICE_ALERTS_FILE, all_alerts)
-
         except Exception as e:
             print("Monitor loop:", e)
         time.sleep(MONITOR_INTERVAL)
@@ -447,62 +430,161 @@ def calc_fib(df, lookback=100):
         '0.5': h - d*0.5, '0.618': h - d*0.618, '0.786': h - d*0.786, '1.0': l
     }
 
-def find_nodes(df, mult=1.15, lb=4):
-    if df is None or len(df) < 50: return []
+# ===================== NDS هندسی =====================
+
+def detect_swing_nodes(df, lb=3, atr_mult=0.8):
+    if df is None or len(df) < lb * 4 + 10:
+        return []
     atr = calc_atr(df).bfill()
+    hs, ls = df["high"].values, df["low"].values
     nodes = []
-    hs, ls = df['high'].values, df['low'].values
-    for i in range(lb, len(df)-lb):
-        if hs[i] == max(hs[i-lb:i+lb+1]) and (hs[i] - min(ls[i-lb:i])) > atr.iloc[i]*mult:
-            nodes.append({'type': 'high', 'price': float(hs[i]), 'index': i})
-        if ls[i] == min(ls[i-lb:i+lb+1]) and (max(hs[i-lb:i]) - ls[i]) > atr.iloc[i]*mult:
-            nodes.append({'type': 'low', 'price': float(ls[i]), 'index': i})
+    for i in range(lb, len(df) - lb):
+        if hs[i] == max(hs[i - lb:i + lb + 1]) and (hs[i] - min(ls[i - lb:i + 1])) > float(atr.iloc[i]) * atr_mult:
+            nodes.append({"type": "high", "price": float(hs[i]), "index": i})
+        if ls[i] == min(ls[i - lb:i + lb + 1]) and (max(hs[i - lb:i + 1]) - ls[i]) > float(atr.iloc[i]) * atr_mult:
+            nodes.append({"type": "low", "price": float(ls[i]), "index": i})
+    nodes.sort(key=lambda x: x["index"])
     return nodes
 
-def detect_order_blocks(df, lookback=40):
-    if df is None or len(df) < lookback + 5:
-        return []
-    sub = df.tail(lookback).copy()
-    atr = float(calc_atr(df).iloc[-1] or 0)
-    blocks = []
-    for i in range(2, len(sub)-2):
-        body = abs(sub['close'].iloc[i] - sub['open'].iloc[i])
-        rng = sub['high'].iloc[i] - sub['low'].iloc[i]
-        if rng <= 0 or atr <= 0:
+def build_displacements(nodes):
+    legs = []
+    for i in range(1, len(nodes)):
+        a, b = nodes[i - 1], nodes[i]
+        if a["type"] == b["type"]:
             continue
-        if body > atr * 0.8 and body / rng > 0.55:
-            direction = "bullish" if sub['close'].iloc[i] > sub['open'].iloc[i] else "bearish"
-            if direction == "bullish" and sub['low'].iloc[i+1:i+3].min() >= sub['low'].iloc[i] * 0.998:
-                blocks.append({"type": "bullish_ob", "low": float(sub['low'].iloc[i]), "high": float(sub['high'].iloc[i])})
-            if direction == "bearish" and sub['high'].iloc[i+1:i+3].max() <= sub['high'].iloc[i] * 1.002:
-                blocks.append({"type": "bearish_ob", "low": float(sub['low'].iloc[i]), "high": float(sub['high'].iloc[i])})
-    return blocks[-3:]
+        delta = b["price"] - a["price"]
+        legs.append({
+            "from": a, "to": b, "delta": delta,
+            "direction": "up" if delta > 0 else "down",
+            "abs_move": abs(delta),
+            "start": a["price"], "end": b["price"],
+        })
+    return legs
+
+def classify_structure(nodes):
+    highs = [n for n in nodes if n["type"] == "high"]
+    lows = [n for n in nodes if n["type"] == "low"]
+    if len(highs) < 2 or len(lows) < 2:
+        return "خنثی", "ناقص", None, None
+    lh, ph = highs[-1]["price"], highs[-2]["price"]
+    ll, pl = lows[-1]["price"], lows[-2]["price"]
+    if lh > ph and ll > pl:
+        return "صعودی", "HH+HL", lh, ll
+    if lh < ph and ll < pl:
+        return "نزولی", "LH+LL", lh, ll
+    return "خنثی", "رنج/انتقالی", lh, ll
+
+def detect_hooks(nodes):
+    if len(nodes) < 3:
+        return []
+    hooks = []
+    recent = nodes[-6:]
+    h_i = l_i = 0
+    for n in recent:
+        if n["type"] == "high":
+            h_i += 1
+            hooks.append({**n, "label": f"H{h_i}", "role": "hook_high"})
+        else:
+            l_i += 1
+            hooks.append({**n, "label": f"F{l_i}", "role": "hook_low"})
+    return hooks
+
+def _leg_86(start_price, end_price):
+    return end_price + 0.86 * (start_price - end_price)
+
+def find_123_pattern(df, direction_bias, lookback=50):
+    if df is None or len(df) < lookback:
+        return None
+    sub = df.tail(lookback).reset_index(drop=True)
+    nodes = detect_swing_nodes(sub, lb=2, atr_mult=0.55)
+    if len(nodes) < 3:
+        return None
+    n1, n2, n3 = nodes[-3], nodes[-2], nodes[-1]
+    if direction_bias == "صعودی":
+        if n1["type"] == "low" and n2["type"] == "high" and n3["type"] == "low":
+            if n3["price"] > n1["price"] and n2["price"] > n3["price"]:
+                return {"ok": True, "kind": "123_bull", "p1": n1["price"], "p2": n2["price"], "p3": n3["price"]}
+    if direction_bias == "نزولی":
+        if n1["type"] == "high" and n2["type"] == "low" and n3["type"] == "high":
+            if n3["price"] < n1["price"] and n2["price"] < n3["price"]:
+                return {"ok": True, "kind": "123_bear", "p1": n1["price"], "p2": n2["price"], "p3": n3["price"]}
+    return None
+
+def analyze_nds_geometric(df_htf, df_ltf=None, price=None):
+    result = {
+        "bias": "خنثی", "cycle": "—", "trade_allowed": False,
+        "reason": "جهت تایم بالاتر مشخص نیست",
+        "last_high": None, "last_low": None, "nodes": [], "hooks": [], "legs": [],
+        "level_86": None, "level_86_side": None, "pattern_123": None, "entry_zone": None,
+        "tf_low": None, "tf_high": None,
+    }
+    if df_htf is None or len(df_htf) < 60:
+        result["reason"] = "داده تایم بالاتر ناکافی"
+        return result
+    price = float(price if price is not None else df_htf["close"].iloc[-1])
+    result["tf_low"] = float(df_htf["low"].tail(80).min())
+    result["tf_high"] = float(df_htf["high"].tail(80).max())
+    nodes = detect_swing_nodes(df_htf, lb=4, atr_mult=1.0)
+    result["nodes"] = nodes
+    bias, cycle, last_high, last_low = classify_structure(nodes)
+    result["bias"] = bias
+    result["cycle"] = cycle
+    result["last_high"] = last_high
+    result["last_low"] = last_low
+    result["hooks"] = detect_hooks(nodes)
+    legs = build_displacements(nodes)
+    result["legs"] = legs
+    if bias not in ("صعودی", "نزولی"):
+        result["trade_allowed"] = False
+        result["reason"] = "طبق NDS: جهت تایم بالاتر روشن نیست → معامله نکن"
+        return result
+    level_86 = None
+    side = None
+    if legs:
+        if bias == "صعودی":
+            down_legs = [lg for lg in legs if lg["direction"] == "down"]
+            if down_legs:
+                lg = down_legs[-1]
+                level_86 = _leg_86(lg["start"], lg["end"])
+                side = "buy_zone_86"
+        else:
+            up_legs = [lg for lg in legs if lg["direction"] == "up"]
+            if up_legs:
+                lg = up_legs[-1]
+                level_86 = _leg_86(lg["start"], lg["end"])
+                side = "sell_zone_86"
+    result["level_86"] = level_86
+    result["level_86_side"] = side
+    pattern = None
+    if df_ltf is not None and len(df_ltf) >= 40:
+        pattern = find_123_pattern(df_ltf, bias, lookback=50)
+        result["pattern_123"] = pattern
+    near_86 = False
+    if level_86 is not None and price > 0:
+        near_86 = abs(price - level_86) / price <= 0.012
+    if bias == "صعودی" and (near_86 or (pattern and pattern.get("kind") == "123_bull")):
+        result["trade_allowed"] = True
+        result["entry_zone"] = level_86 or (pattern["p3"] if pattern else price)
+        result["reason"] = "جهت بالاتر صعودی + تأیید ۸۶٪/۱-۲-۳"
+    elif bias == "نزولی" and (near_86 or (pattern and pattern.get("kind") == "123_bear")):
+        result["trade_allowed"] = True
+        result["entry_zone"] = level_86 or (pattern["p3"] if pattern else price)
+        result["reason"] = "جهت بالاتر نزولی + تأیید ۸۶٪/۱-۲-۳"
+    else:
+        result["trade_allowed"] = False
+        result["reason"] = f"جهت بالاتر {bias}؛ هنوز تأیید ۸۶٪ یا ۱-۲-۳ کامل نیست → صبر"
+    return result
 
 def analyze_nds(df):
-    if df is None or len(df) < 60:
-        return {'bias': 'خنثی', 'cycle': '—', 'last_high': None, 'last_low': None, 'nodes': [], 'tf_low': None, 'tf_high': None}
-    nodes = find_nodes(df)
-    price = float(df['close'].iloc[-1])
-    tf_low = float(df['low'].tail(80).min())
-    tf_high = float(df['high'].tail(80).max())
-    if len(nodes) < 4:
-        return {'bias': 'خنثی', 'cycle': 'ناقص', 'last_high': None, 'last_low': None, 'nodes': nodes, 'tf_low': tf_low, 'tf_high': tf_high}
-    highs = [n for n in nodes if n['type'] == 'high']
-    lows = [n for n in nodes if n['type'] == 'low']
-    last_high = highs[-1]['price'] if highs else price
-    prev_high = highs[-2]['price'] if len(highs) > 1 else last_high
-    last_low = lows[-1]['price'] if lows else price
-    prev_low = lows[-2]['price'] if len(lows) > 1 else last_low
-    if last_high > prev_high and last_low > prev_low:
-        bias, cycle = "صعودی", "HH+HL"
-    elif last_high < prev_high and last_low < prev_low:
-        bias, cycle = "نزولی", "LH+LL"
-    else:
-        bias, cycle = "خنثی", "رنج"
+    """سازگاری با خروجی قبلی + هندسه"""
+    geo = analyze_nds_geometric(df, None, float(df["close"].iloc[-1]) if df is not None and len(df) else None)
     return {
-        'bias': bias, 'cycle': cycle,
-        'last_high': last_high, 'last_low': last_low,
-        'nodes': nodes, 'tf_low': tf_low, 'tf_high': tf_high
+        "bias": geo["bias"], "cycle": geo["cycle"],
+        "last_high": geo["last_high"], "last_low": geo["last_low"],
+        "nodes": geo["nodes"], "hooks": geo["hooks"],
+        "tf_low": geo["tf_low"], "tf_high": geo["tf_high"],
+        "level_86": geo["level_86"], "trade_allowed": geo["trade_allowed"],
+        "reason": geo["reason"], "pattern_123": geo.get("pattern_123"),
     }
 
 def analyze_nds_multi(symbol, current_price=None):
@@ -514,10 +596,8 @@ def analyze_nds_multi(symbol, current_price=None):
             results.append({"interval": interval, "label": label, "bias": "—", "cycle": "داده ناکافی", "ok": False})
             continue
         info = analyze_nds(df)
-        tf_low = info.get("tf_low")
-        tf_high = info.get("tf_high")
-        dist_pct = None
-        range_val = None
+        tf_low, tf_high = info.get("tf_low"), info.get("tf_high")
+        dist_pct = range_val = None
         if tf_low is not None and current_price:
             dist_pct = (current_price - tf_low) / current_price * 100
         if tf_low is not None and tf_high is not None:
@@ -527,127 +607,113 @@ def analyze_nds_multi(symbol, current_price=None):
             "bias": info["bias"], "cycle": info["cycle"],
             "last_high": info.get("last_high"), "last_low": info.get("last_low"),
             "tf_low": tf_low, "tf_high": tf_high,
-            "dist_pct": dist_pct, "range_val": range_val,
-            "ok": True
+            "dist_pct": dist_pct, "range_val": range_val, "ok": True
         })
     return results
 
-def calculate_signal_score(nds_results, rsi, funding, volume_ratio, higher_bias, short_bias, macd_hist=None):
-    """امتیاز سخت‌گیرانه‌تر برای سیگنال پایدار"""
+def detect_order_blocks(df, lookback=40):
+    if df is None or len(df) < lookback + 5:
+        return []
+    sub = df.tail(lookback).copy()
+    atr = float(calc_atr(df).iloc[-1] or 0)
+    blocks = []
+    for i in range(2, len(sub) - 2):
+        body = abs(sub["close"].iloc[i] - sub["open"].iloc[i])
+        rng = sub["high"].iloc[i] - sub["low"].iloc[i]
+        if rng <= 0 or atr <= 0:
+            continue
+        if body > atr * 0.8 and body / rng > 0.55:
+            direction = "bullish" if sub["close"].iloc[i] > sub["open"].iloc[i] else "bearish"
+            if direction == "bullish" and sub["low"].iloc[i + 1:i + 3].min() >= sub["low"].iloc[i] * 0.998:
+                blocks.append({"type": "bullish_ob", "low": float(sub["low"].iloc[i]), "high": float(sub["high"].iloc[i])})
+            if direction == "bearish" and sub["high"].iloc[i + 1:i + 3].max() <= sub["high"].iloc[i] * 1.002:
+                blocks.append({"type": "bearish_ob", "low": float(sub["low"].iloc[i]), "high": float(sub["high"].iloc[i])})
+    return blocks[-3:]
+
+def calculate_signal_score(nds_results, rsi, funding, volume_ratio, higher_bias, short_bias, macd_hist=None, geo=None):
     score = 50.0
     reasons, risks = [], []
-
     higher_tfs = [r for r in nds_results if r["interval"] in ["1d", "3d", "1w", "1M", "12h", "8h"] and r["ok"]]
     mid_tfs = [r for r in nds_results if r["interval"] in ["4h", "6h", "2h", "1h"] and r["ok"]]
-    lower_tfs = [r for r in nds_results if r["interval"] in ["30m", "15m", "5m"] and r["ok"]]
-
     bullish_h = sum(1 for r in higher_tfs if r["bias"] == "صعودی")
     bearish_h = sum(1 for r in higher_tfs if r["bias"] == "نزولی")
-    bullish_m = sum(1 for r in mid_tfs if r["bias"] == "صعودی")
-    bearish_m = sum(1 for r in mid_tfs if r["bias"] == "نزولی")
-
-    if bullish_h >= MIN_HIGHER_TF_ALIGN:
-        score += 20
-        reasons.append(f"هم‌راستایی تایم‌فریم بالاتر صعودی ({bullish_h} مورد)")
+    if bullish_h >= 3:
+        score += 18
+        reasons.append(f"هم‌راستایی تایم بالاتر صعودی ({bullish_h})")
         higher_bias = "صعودی"
-    elif bearish_h >= MIN_HIGHER_TF_ALIGN:
-        score -= 20
-        reasons.append(f"هم‌راستایی تایم‌فریم بالاتر نزولی ({bearish_h} مورد)")
+    elif bearish_h >= 3:
+        score -= 18
+        reasons.append(f"هم‌راستایی تایم بالاتر نزولی ({bearish_h})")
         higher_bias = "نزولی"
     else:
-        risks.append("عدم هم‌راستایی کافی تایم‌فریم‌های بالاتر — سیگنال ضعیف")
         score -= 10
+        risks.append("عدم هم‌راستایی کافی تایم‌فریم‌های بالاتر")
 
-    if higher_bias == "صعودی" and bullish_m >= 2:
-        score += 12
-        reasons.append("تأیید میان‌مدت صعودی")
-    elif higher_bias == "نزولی" and bearish_m >= 2:
-        score += 12
-        reasons.append("تأیید میان‌مدت نزولی")
-    elif higher_bias != "خنثی":
-        score -= 8
-        risks.append("واگرایی میان‌مدت با تایم‌فریم بالاتر")
-
-    # تایم‌فریم پایین نباید خلاف جهت قوی باشد
-    if higher_bias == "صعودی":
-        against = sum(1 for r in lower_tfs if r["bias"] == "نزولی")
-        if against >= 2:
-            score -= 7
-            risks.append("فشار نزولی در تایم‌فریم پایین")
-    elif higher_bias == "نزولی":
-        against = sum(1 for r in lower_tfs if r["bias"] == "صعودی")
-        if against >= 2:
-            score -= 7
-            risks.append("فشار صعودی در تایم‌فریم پایین")
+    if geo:
+        if geo.get("trade_allowed"):
+            score += 12
+            reasons.append(f"NDS هندسی: {geo.get('reason')}")
+        else:
+            score -= 8
+            risks.append(geo.get("reason") or "تأیید هندسی ناکافی")
+        if geo.get("level_86"):
+            reasons.append(f"سطح ۸۶٪: {geo['level_86']:.4f}")
+        if geo.get("pattern_123"):
+            reasons.append(f"الگوی ۱-۲-۳: {geo['pattern_123'].get('kind')}")
 
     if 40 <= rsi <= 60:
-        score += 6
+        score += 5
         reasons.append(f"RSI متعادل ({rsi:.1f})")
     elif rsi > 72:
-        score -= 10
+        score -= 9
         risks.append(f"RSI اشباع خرید ({rsi:.1f})")
     elif rsi < 28:
-        score -= 10
+        score -= 9
         risks.append(f"RSI اشباع فروش ({rsi:.1f})")
 
     if funding is not None:
-        if higher_bias == "صعودی" and funding < 0:
-            score += 4
-            reasons.append(f"فاندینگ منفی هم‌راستا ({funding:.4f}%)")
-        elif higher_bias == "نزولی" and funding > 0.02:
-            score += 4
-            reasons.append(f"فاندینگ مثبت هم‌راستا با شورت ({funding:.4f}%)")
-        elif abs(funding) > 0.08:
-            score -= 5
+        if abs(funding) > 0.08:
+            score -= 4
             risks.append(f"فاندینگ افراطی ({funding:.4f}%)")
+        else:
+            reasons.append(f"فاندینگ ({funding:.4f}%)")
 
     if volume_ratio is not None:
         if volume_ratio >= 1.15:
-            score += 4
-            reasons.append(f"حجم نسبی قابل قبول ({volume_ratio:.2f}x)")
+            score += 3
         elif volume_ratio < 0.55:
-            score -= 5
+            score -= 4
             risks.append(f"حجم ضعیف ({volume_ratio:.2f}x)")
 
-    if macd_hist is not None:
-        if higher_bias == "صعودی" and macd_hist > 0:
-            score += 5
-            reasons.append("MACD هیستوگرام مثبت")
-        elif higher_bias == "نزولی" and macd_hist < 0:
-            score += 5
-            reasons.append("MACD هیستوگرام منفی")
-        elif higher_bias != "خنثی":
-            score -= 4
-            risks.append("MACD خلاف بایاس غالب")
+    if macd_hist is not None and higher_bias in ("صعودی", "نزولی"):
+        if (higher_bias == "صعودی" and macd_hist > 0) or (higher_bias == "نزولی" and macd_hist < 0):
+            score += 4
+            reasons.append("MACD هم‌راستا")
+        else:
+            score -= 3
+            risks.append("MACD خلاف بایاس")
 
-    # مونت‌کارلو فقط به‌عنوان تأیید خفیف
     if higher_bias == "صعودی" and short_bias:
-        score += 4
-        reasons.append("تأیید خفیف افق کوتاه‌مدت")
+        score += 3
     elif higher_bias == "نزولی" and not short_bias:
-        score += 4
-        reasons.append("تأیید خفیف افق کوتاه‌مدت")
+        score += 3
     elif higher_bias != "خنثی":
-        score -= 6
+        score -= 5
         risks.append("افق کوتاه‌مدت با بایاس غالب هم‌خوان نیست")
 
     return max(0, min(100, round(score, 1))), reasons, risks, higher_bias
 
 def calculate_dollar_sl_tp(entry, direction, atr, margin=5.0, leverage=8, risk_dollar=0.5, structure_low=None, structure_high=None):
-    """تارگت واقع‌بینانه‌تر بر اساس ATR + ساختار"""
     position_size = margin * leverage
     price_risk = (risk_dollar / position_size) * entry
-    atr_distance = atr * 1.6  # کمی بازتر برای پایداری بیشتر
+    atr_distance = atr * 1.6
     final_distance = max(price_risk, atr_distance * 0.85)
-
     if direction == "LONG":
         sl = entry - final_distance
         if structure_low and structure_low < entry:
-            # SL کمی زیر ساختار
             sl = min(sl, structure_low - atr * 0.15)
         tp = entry + final_distance * 2.0
         if structure_high and structure_high > entry:
-            # TP را تا نزدیک مقاومت بکش، نه فراتر از منطق
             tp = min(tp, structure_high - atr * 0.1) if structure_high - entry > final_distance else tp
     else:
         sl = entry + final_distance
@@ -659,109 +725,124 @@ def calculate_dollar_sl_tp(entry, direction, atr, margin=5.0, leverage=8, risk_d
     return round(sl, 4), round(tp, 4)
 
 def draw_candles(ax, df, width=0.55):
-    opens, highs, lows, closes = df['open'].values, df['high'].values, df['low'].values, df['close'].values
+    opens, highs, lows, closes = df["open"].values, df["high"].values, df["low"].values, df["close"].values
     for i in range(len(df)):
-        color = '#2ed573' if closes[i] >= opens[i] else '#ff4757'
+        color = "#2ed573" if closes[i] >= opens[i] else "#ff4757"
         ax.plot([i, i], [lows[i], highs[i]], color=color, lw=0.9, zorder=3)
         bottom = min(opens[i], closes[i])
-        height = abs(closes[i] - opens[i]) or (highs[i]-lows[i])*0.02 or 1e-8
-        ax.add_patch(Rectangle((i - width/2, bottom), width, height, facecolor=color, edgecolor=color, lw=0.4, zorder=4))
+        height = abs(closes[i] - opens[i]) or (highs[i] - lows[i]) * 0.02 or 1e-8
+        ax.add_patch(Rectangle((i - width / 2, bottom), width, height, facecolor=color, edgecolor=color, lw=0.4, zorder=4))
+
+def draw_hook_arc(ax, x, y, label, is_high=True, x_scale=1.0, y_scale=1.0):
+    """کمان رنگی + برچسب به‌جای مربع"""
+    color = "#ff6b6b" if is_high else "#1dd1a1"
+    # اندازه کمان نسبت به مقیاس محور
+    w = max(2.8, 3.5 * x_scale)
+    h = max(y * 0.006, y_scale * 0.008)
+    theta1, theta2 = (0, 180) if is_high else (180, 360)
+    cy = y + h * 0.35 if is_high else y - h * 0.35
+    try:
+        arc = Arc((x, cy), width=w, height=h * 2.2, angle=0, theta1=theta1, theta2=theta2,
+                  color=color, lw=2.0, zorder=12)
+        ax.add_patch(arc)
+    except Exception:
+        ax.plot([x - w / 2, x + w / 2], [y, y], color=color, lw=2.0, zorder=12)
+    ty = y + h * 1.6 if is_high else y - h * 1.8
+    ax.text(x, ty, label, fontsize=7.2, ha="center", va="center", color=color, fontweight="bold", zorder=13)
 
 def create_pro_chart(df, title, fibs=None, entry=None, sl=None, tp=None,
-                     sims=None, mean_path=None, nds_info=None, bias=None, mark_hugs=False):
+                     sims=None, mean_path=None, nds_info=None, bias=None, mark_hugs=False, level_86=None):
     plot_df = df.tail(100).copy().reset_index(drop=True)
     n = len(plot_df)
-    fig = plt.figure(figsize=(14, 9.4), facecolor='#0d0d0d')
+    fig = plt.figure(figsize=(14, 9.4), facecolor="#0d0d0d")
     gs = GridSpec(4, 1, height_ratios=[3.3, 0.95, 0.95, 0.04], hspace=0.07)
     ax = fig.add_subplot(gs[0])
     ax_macd = fig.add_subplot(gs[1], sharex=ax)
     ax_rsi = fig.add_subplot(gs[2], sharex=ax)
     for a in [ax, ax_macd, ax_rsi]:
-        a.set_facecolor('#0d0d0d')
-        a.tick_params(colors='#cccccc', labelsize=7.2)
+        a.set_facecolor("#0d0d0d")
+        a.tick_params(colors="#cccccc", labelsize=7.2)
         for spine in a.spines.values():
-            spine.set_color('#333333')
+            spine.set_color("#333333")
 
     draw_candles(ax, plot_df)
-    ax.plot(plot_df['sma20'].values, color='#da70d6', lw=1.0, label='MA20', alpha=0.9)
-    ax.plot(plot_df['sma50'].values, color='#ffa500', lw=1.1, label='MA50')
-    if 'sma200' in plot_df.columns:
-        ax.plot(plot_df['sma200'].values, color='#1e90ff', lw=1.15, label='MA200', alpha=0.85)
-    ax.plot(plot_df['ema20'].values, color='#00fa9a', lw=0.95, label='EMA20', alpha=0.85)
-    ax.plot(plot_df['ema50'].values, color='#ff6347', lw=1.0, label='EMA50', alpha=0.85)
-    ax.plot(plot_df['bb_upper'].values, color='#888888', lw=0.8, ls='--', alpha=0.65)
-    ax.plot(plot_df['bb_lower'].values, color='#888888', lw=0.8, ls='--', alpha=0.65)
-    if 'senkou_a' in plot_df.columns:
-        ax.fill_between(range(n), plot_df['senkou_a'].values, plot_df['senkou_b'].values,
-                        where=plot_df['senkou_a'] >= plot_df['senkou_b'], color='#00ff7f', alpha=0.11)
-        ax.fill_between(range(n), plot_df['senkou_a'].values, plot_df['senkou_b'].values,
-                        where=plot_df['senkou_a'] < plot_df['senkou_b'], color='#ff69b4', alpha=0.11)
+    ax.plot(plot_df["sma20"].values, color="#da70d6", lw=1.0, label="MA20", alpha=0.9)
+    ax.plot(plot_df["sma50"].values, color="#ffa500", lw=1.1, label="MA50")
+    if "sma200" in plot_df.columns:
+        ax.plot(plot_df["sma200"].values, color="#1e90ff", lw=1.15, label="MA200", alpha=0.85)
+    ax.plot(plot_df["ema20"].values, color="#00fa9a", lw=0.95, label="EMA20", alpha=0.85)
+    ax.plot(plot_df["ema50"].values, color="#ff6347", lw=1.0, label="EMA50", alpha=0.85)
+    ax.plot(plot_df["bb_upper"].values, color="#888888", lw=0.8, ls="--", alpha=0.65)
+    ax.plot(plot_df["bb_lower"].values, color="#888888", lw=0.8, ls="--", alpha=0.65)
+    if "senkou_a" in plot_df.columns:
+        ax.fill_between(range(n), plot_df["senkou_a"].values, plot_df["senkou_b"].values,
+                        where=plot_df["senkou_a"] >= plot_df["senkou_b"], color="#00ff7f", alpha=0.11)
+        ax.fill_between(range(n), plot_df["senkou_a"].values, plot_df["senkou_b"].values,
+                        where=plot_df["senkou_a"] < plot_df["senkou_b"], color="#ff69b4", alpha=0.11)
     if fibs:
-        colors = {'0.0':'#ffffff', '0.236':'#ff6b6b', '0.382':'#ff9f43', '0.5':'#feca57',
-                  '0.618':'#1dd1a1', '0.786':'#54a0ff', '1.0':'#a55eea'}
+        colors = {"0.0": "#ffffff", "0.236": "#ff6b6b", "0.382": "#ff9f43", "0.5": "#feca57",
+                  "0.618": "#1dd1a1", "0.786": "#54a0ff", "1.0": "#a55eea"}
         for k, v in fibs.items():
-            c = colors.get(k, '#aaaaaa')
-            ax.axhline(v, color=c, ls=':', lw=0.85, alpha=0.8)
-            ax.text(n + 1.0, v, f'{k} {v:.2f}', fontsize=6.6, va='center', color=c)
-    if entry: ax.axhline(entry, color='#1e90ff', lw=1.25, label='Entry')
-    if sl: ax.axhline(sl, color='#ff4757', lw=1.25, label='SL')
-    if tp: ax.axhline(tp, color='#2ed573', lw=1.25, label='TP')
+            c = colors.get(k, "#aaaaaa")
+            ax.axhline(v, color=c, ls=":", lw=0.85, alpha=0.8)
+            ax.text(n + 1.0, v, f"{k} {v:.2f}", fontsize=6.6, va="center", color=c)
+    if level_86 is not None:
+        ax.axhline(level_86, color="#f1c40f", lw=1.4, ls="-.", alpha=0.95, label="86% Leg")
+        ax.text(n + 1.0, level_86, f"86% {level_86:.2f}", fontsize=7, va="center", color="#f1c40f", fontweight="bold")
+    if entry: ax.axhline(entry, color="#1e90ff", lw=1.25, label="Entry")
+    if sl: ax.axhline(sl, color="#ff4757", lw=1.25, label="SL")
+    if tp: ax.axhline(tp, color="#2ed573", lw=1.25, label="TP")
     if sims is not None and mean_path is not None:
         last = n - 1
         horizon = len(mean_path)
         for s in sims[::3]:
-            ax.plot(range(last, last+horizon), s[:horizon], color='#ffffff', alpha=0.15, lw=0.7)
-        ax.plot(range(last, last+horizon), mean_path, color='#ffffff', lw=1.8, label='Pred 4-6h', zorder=6)
+            ax.plot(range(last, last + horizon), s[:horizon], color="#ffffff", alpha=0.15, lw=0.7)
+        ax.plot(range(last, last + horizon), mean_path, color="#ffffff", lw=1.8, label="Pred 4-6h", zorder=6)
 
     if nds_info and mark_hugs:
-        nodes = nds_info.get('nodes', [])
+        hooks = nds_info.get("hooks") or []
+        nodes = hooks if hooks else (nds_info.get("nodes") or [])
         offset = len(df) - n
-        recent_nodes = nodes[-6:] if len(nodes) >= 6 else nodes
-        hug_count = flag_count = 0
-        for node in recent_nodes:
-            x = node['index'] - offset
-            if not (0 <= x < n): continue
-            y = node['price']
-            if node['type'] == 'high':
-                hug_count += 1
-                color, label = '#ff6b6b', f"H{hug_count}"
-            else:
-                flag_count += 1
-                color, label = '#1dd1a1', f"F{flag_count}"
-            size = max(1.2, n * 0.007)
-            ax.add_patch(Rectangle((x - size/2, y - y*0.004), size, y*0.008, linewidth=1.2, edgecolor=color, facecolor=color, alpha=0.85, zorder=11))
-            ax.text(x, y + y*0.012, label, fontsize=6.6, ha='center', color=color, fontweight='bold', zorder=12)
+        y_range = float(plot_df["high"].max() - plot_df["low"].min()) or 1.0
+        for node in nodes[-6:]:
+            x = node["index"] - offset
+            if not (0 <= x < n):
+                continue
+            y = node["price"]
+            is_high = node.get("type") == "high"
+            label = node.get("label") or ("H" if is_high else "F")
+            draw_hook_arc(ax, x, y, label, is_high=is_high, x_scale=1.0, y_scale=y_range)
 
-    ax.set_title(title, color='white', fontsize=11.5, pad=8)
-    ax.legend(loc='upper left', fontsize=6.5, facecolor='#1a1a1a', edgecolor='#333', labelcolor='white', ncol=3)
-    ax.grid(True, alpha=0.16, color='#444')
+    ax.set_title(title, color="white", fontsize=11.5, pad=8)
+    ax.legend(loc="upper left", fontsize=6.5, facecolor="#1a1a1a", edgecolor="#333", labelcolor="white", ncol=3)
+    ax.grid(True, alpha=0.16, color="#444")
     ax.yaxis.tick_right()
-    ax.yaxis.set_major_formatter(FormatStrFormatter('%.2f'))
-    ax.set_xlim(-1, n+12)
+    ax.yaxis.set_major_formatter(FormatStrFormatter("%.2f"))
+    ax.set_xlim(-1, n + 12)
 
-    if 'macd' in plot_df.columns:
-        hist = plot_df['macd_hist'].values
-        colors_h = ['#2ed573' if v >= 0 else '#ff4757' for v in hist]
+    if "macd" in plot_df.columns:
+        hist = plot_df["macd_hist"].values
+        colors_h = ["#2ed573" if v >= 0 else "#ff4757" for v in hist]
         ax_macd.bar(range(n), hist, color=colors_h, alpha=0.75, width=0.7)
-        ax_macd.plot(plot_df['macd'].values, color='#00bfff', lw=1.1, label='MACD')
-        ax_macd.plot(plot_df['macd_signal'].values, color='#ffa500', lw=1.0, label='Signal')
-        ax_macd.axhline(0, color='#666', lw=0.7, alpha=0.6)
-        ax_macd.legend(loc='upper left', fontsize=6.2, facecolor='#1a1a1a', labelcolor='white')
-    ax_macd.set_ylabel('MACD', color='#aaaaaa', fontsize=7.2)
-    ax_macd.grid(True, alpha=0.14, color='#444')
+        ax_macd.plot(plot_df["macd"].values, color="#00bfff", lw=1.1, label="MACD")
+        ax_macd.plot(plot_df["macd_signal"].values, color="#ffa500", lw=1.0, label="Signal")
+        ax_macd.axhline(0, color="#666", lw=0.7, alpha=0.6)
+        ax_macd.legend(loc="upper left", fontsize=6.2, facecolor="#1a1a1a", labelcolor="white")
+    ax_macd.set_ylabel("MACD", color="#aaaaaa", fontsize=7.2)
+    ax_macd.grid(True, alpha=0.14, color="#444")
 
-    ax_rsi.plot(plot_df['rsi'].values, color='#e056fd', lw=1.1)
-    ax_rsi.axhline(70, color='#ff4757', ls='--', lw=0.7, alpha=0.6)
-    ax_rsi.axhline(30, color='#2ed573', ls='--', lw=0.7, alpha=0.6)
-    ax_rsi.axhline(50, color='#888888', ls=':', lw=0.6, alpha=0.5)
+    ax_rsi.plot(plot_df["rsi"].values, color="#e056fd", lw=1.1)
+    ax_rsi.axhline(70, color="#ff4757", ls="--", lw=0.7, alpha=0.6)
+    ax_rsi.axhline(30, color="#2ed573", ls="--", lw=0.7, alpha=0.6)
+    ax_rsi.axhline(50, color="#888888", ls=":", lw=0.6, alpha=0.5)
     ax_rsi.set_ylim(0, 100)
-    ax_rsi.set_ylabel('RSI', color='#aaaaaa', fontsize=7.2)
-    ax_rsi.grid(True, alpha=0.14, color='#444')
+    ax_rsi.set_ylabel("RSI", color="#aaaaaa", fontsize=7.2)
+    ax_rsi.grid(True, alpha=0.14, color="#444")
     plt.setp(ax.get_xticklabels(), visible=False)
     plt.setp(ax_macd.get_xticklabels(), visible=False)
 
     buf = io.BytesIO()
-    plt.savefig(buf, format='png', bbox_inches='tight', dpi=155, facecolor='#0d0d0d')
+    plt.savefig(buf, format="png", bbox_inches="tight", dpi=155, facecolor="#0d0d0d")
     buf.seek(0)
     plt.close()
     return buf
@@ -828,7 +909,6 @@ async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode="Markdown", disable_web_page_preview=True)
 
 async def alert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """ /alert BTCUSDT 95000 above  یا  /alert BTCUSDT 90000 below """
     if not is_private(update): return
     uid = update.effective_user.id
     if not is_subscribed(uid) and not is_admin(uid):
@@ -836,8 +916,7 @@ async def alert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if len(context.args) < 3:
         await update.message.reply_text(
-            "فرمت:\n`/alert نماد قیمت above|below`\n\n"
-            "مثال:\n`/alert BTCUSDT 95000 above`\n`/alert ETHUSDT 2800 below`",
+            "فرمت:\n`/alert نماد قیمت above|below`\nمثال:\n`/alert BTCUSDT 95000 above`",
             parse_mode="Markdown"
         )
         return
@@ -846,11 +925,11 @@ async def alert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target = float(context.args[1])
         condition = context.args[2].lower()
         if condition not in ("above", "below"):
-            await update.message.reply_text("شرط باید `above` یا `below` باشد.")
+            await update.message.reply_text("شرط: `above` یا `below`")
             return
         a = add_price_alert(uid, symbol, target, condition)
         await update.message.reply_text(
-            f"✅ هشدار ثبت شد\n\nID: `{a['id']}`\n`{symbol}` {condition} `{target}`\n\nلیست: `/alerts`",
+            f"✅ هشدار ثبت شد\nID: `{a['id']}`\n`{symbol}` {condition} `{target}`\n`/alerts`",
             parse_mode="Markdown"
         )
     except Exception as e:
@@ -864,7 +943,7 @@ async def alerts_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     alerts = get_user_price_alerts(uid)
     if not alerts:
-        await update.message.reply_text("هشداری ثبت نشده.\n`/alert BTCUSDT 95000 above`")
+        await update.message.reply_text("هشداری نیست.\n`/alert BTCUSDT 95000 above`")
         return
     lines = ["🚨 **هشدارهای قیمت**\n"]
     for a in alerts:
@@ -879,16 +958,10 @@ async def removealert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ دسترسی ندارید.")
         return
     if not context.args:
-        await update.message.reply_text("فرمت: `/removealert ID`", parse_mode="Markdown")
+        await update.message.reply_text("`/removealert ID`", parse_mode="Markdown")
         return
-    try:
-        n = remove_price_alert(uid, context.args[0])
-        if n:
-            await update.message.reply_text("✅ هشدار حذف شد.")
-        else:
-            await update.message.reply_text("ID پیدا نشد.")
-    except Exception as e:
-        await update.message.reply_text(str(e)[:80])
+    n = remove_price_alert(uid, context.args[0])
+    await update.message.reply_text("✅ حذف شد." if n else "ID پیدا نشد.")
 
 async def watch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_private(update): return
@@ -897,7 +970,7 @@ async def watch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ دسترسی ندارید.")
         return
     if not context.args:
-        await update.message.reply_text("مثال:\n`/watch BTCUSDT ETHUSDT`", parse_mode="Markdown")
+        await update.message.reply_text("`/watch BTCUSDT ETHUSDT`", parse_mode="Markdown")
         return
     result = add_to_watchlist(uid, [s.upper() for s in context.args])
     await update.message.reply_text("✅ واچ‌لیست:\n`" + "`, `".join(result) + "`", parse_mode="Markdown")
@@ -909,13 +982,10 @@ async def unwatch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ دسترسی ندارید.")
         return
     if not context.args:
-        await update.message.reply_text("مثال:\n`/unwatch BTCUSDT`", parse_mode="Markdown")
+        await update.message.reply_text("`/unwatch BTCUSDT`", parse_mode="Markdown")
         return
     result = remove_from_watchlist(uid, [s.upper() for s in context.args])
-    if result:
-        await update.message.reply_text("✅ واچ‌لیست:\n`" + "`, `".join(result) + "`", parse_mode="Markdown")
-    else:
-        await update.message.reply_text("واچ‌لیست خالی شد.")
+    await update.message.reply_text("✅ واچ‌لیست:\n`" + "`, `".join(result) + "`" if result else "واچ‌لیست خالی شد.", parse_mode="Markdown")
 
 async def watchlist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_private(update): return
@@ -936,10 +1006,10 @@ async def watchlist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if df_4h is None:
                 lines.append(f"• `{symbol}`: داده نیست")
                 continue
-            nds_d = analyze_nds(df_1d) if df_1d is not None else {'bias': '—'}
+            nds_d = analyze_nds(df_1d) if df_1d is not None else {"bias": "—"}
             nds_4h = analyze_nds(df_4h)
-            higher = nds_d['bias'] if nds_d.get('bias') != "خنثی" else nds_4h['bias']
-            price = float(df_4h['close'].iloc[-1])
+            higher = nds_d["bias"] if nds_d.get("bias") != "خنثی" else nds_4h["bias"]
+            price = float(df_4h["close"].iloc[-1])
             emoji = "🟢" if higher == "صعودی" else "🔴" if higher == "نزولی" else "⚪️"
             lines.append(f"{emoji} `{symbol}` → **{higher}** | `{price:.4f}`")
         except:
@@ -954,7 +1024,7 @@ async def confirm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     pending = get_pending_signal(uid)
     if not pending:
-        await update.message.reply_text("سیگنال معلقی وجود ندارد.")
+        await update.message.reply_text("سیگنال معلقی نیست.")
         return
     if get_open_position(uid):
         await update.message.reply_text("⚠️ پوزیشن باز دارید.")
@@ -963,8 +1033,8 @@ async def confirm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clear_pending_signal(uid)
     await update.message.reply_text(
         f"✅ **پوزیشن ثبت شد**\n\n`{pending['symbol']}` | {pending['direction']}\n"
-        f"ورود: `{pending['entry']}` | SL: `{pending['sl']}` | TP: `{pending['tp']}`\n\n"
-        f"با رسیدن به SL/TP خودکار بسته می‌شود.\n`/position` | `/close`",
+        f"ورود: `{pending['entry']}` | SL: `{pending['sl']}` | TP: `{pending['tp']}`\n"
+        f"با رسیدن به SL/TP خودکار بسته می‌شود.",
         parse_mode="Markdown"
     )
 
@@ -973,9 +1043,9 @@ async def adduser(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args: return
     try:
         uid = str(int(context.args[0]))
-        days = int(context.args[1]) if len(context.args)>1 else SUBSCRIPTION_DAYS
+        days = int(context.args[1]) if len(context.args) > 1 else SUBSCRIPTION_DAYS
         users = load_json(USERS_FILE)
-        users[uid] = {"expiry": (datetime.now(timezone.utc)+timedelta(days=days)).isoformat()}
+        users[uid] = {"expiry": (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()}
         save_json(USERS_FILE, users)
         await update.message.reply_text(f"✅ {uid} برای {days} روز فعال شد.")
     except Exception as e:
@@ -1055,8 +1125,8 @@ async def performance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     win_count, loss_count = len(wins), len(losses)
     winrate = (win_count / total * 100) if total else 0
     total_pnl = sum(pnls)
-    avg_win = sum(wins)/win_count if win_count else 0
-    avg_loss = sum(losses)/loss_count if loss_count else 0
+    avg_win = sum(wins) / win_count if win_count else 0
+    avg_loss = sum(losses) / loss_count if loss_count else 0
     best = max(pnls) if pnls else 0
     worst = min(pnls) if pnls else 0
     text = (
@@ -1077,13 +1147,12 @@ async def position_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     pos = get_open_position(uid)
     if not pos:
-        await update.message.reply_text("📭 پوزیشن بازی وجود ندارد.")
+        await update.message.reply_text("📭 پوزیشن بازی نیست.")
         return
     multi = get_multi_exchange_prices(pos["symbol"])
     price = multi["consensus"] or multi["binance"]
     text = (
-        f"📌 **پوزیشن باز**\n\n"
-        f"نماد: `{pos['symbol']}`\nجهت: **{pos['direction']}**\n"
+        f"📌 **پوزیشن باز**\n\nنماد: `{pos['symbol']}`\nجهت: **{pos['direction']}**\n"
         f"ورود: `{pos['entry']}`\nحد ضرر: `{pos['sl']}`\nحد سود: `{pos['tp']}`\n"
     )
     if price:
@@ -1107,10 +1176,9 @@ async def close_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         clear_pending_signal(uid)
         await update.message.reply_text("✅ پوزیشن بسته شد.")
     else:
-        await update.message.reply_text("📭 پوزیشن بازی وجود ندارد.")
+        await update.message.reply_text("📭 پوزیشن بازی نیست.")
 
 async def market_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """فقط نمادهای واچ‌لیست کاربر"""
     if not is_private(update): return
     uid = update.effective_user.id
     if not check_rate(uid):
@@ -1121,10 +1189,7 @@ async def market_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     wl = get_watchlist(uid)
     if not wl:
-        await update.message.reply_text(
-            "واچ‌لیست خالی است.\nابتدا با `/watch BTCUSDT ETHUSDT` اضافه کنید.\nسپس `/market` بزنید.",
-            parse_mode="Markdown"
-        )
+        await update.message.reply_text("واچ‌لیست خالی است.\n`/watch BTCUSDT ETHUSDT` سپس `/market`", parse_mode="Markdown")
         return
     status = await update.message.reply_text("⏳ وضعیت واچ‌لیست ...")
     try:
@@ -1138,9 +1203,9 @@ async def market_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     continue
                 nds_d = analyze_nds(df_1d)
                 nds_4h = analyze_nds(df_4h)
-                higher = nds_d['bias'] if nds_d['bias'] != "خنثی" else nds_4h['bias']
+                higher = nds_d["bias"] if nds_d["bias"] != "خنثی" else nds_4h["bias"]
                 multi = get_multi_exchange_prices(symbol)
-                price = multi["consensus"] or float(df_4h['close'].iloc[-1])
+                price = multi["consensus"] or float(df_4h["close"].iloc[-1])
                 emoji = "🟢" if higher == "صعودی" else "🔴" if higher == "نزولی" else "⚪️"
                 lines.append(f"{emoji} `{symbol}` → **{higher}** | `{price:.4f}`")
             except:
@@ -1161,55 +1226,52 @@ async def nds_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_subscribed(uid) and not is_admin(uid):
         await update.message.reply_text("❌ دسترسی ندارید.")
         return
-
-    args = context.args
-    symbol = args[0].upper() if args else "BTCUSDT"
-    status = await update.message.reply_text(f"⏳ تحلیل NDS `{symbol}` ...")
-
+    symbol = context.args[0].upper() if context.args else "BTCUSDT"
+    status = await update.message.reply_text(f"⏳ تحلیل NDS هندسی `{symbol}` ...")
     try:
         df_4h = fetch_klines(symbol, "4h", 300)
+        df_15m = fetch_klines(symbol, "15m", 200)
         if df_4h is None or len(df_4h) < 80:
             await status.edit_text("❌ خطا در دریافت داده.")
             return
         df_4h = add_indicators(df_4h)
         multi = get_multi_exchange_prices(symbol)
-        price = multi["consensus"] or float(df_4h['close'].iloc[-1])
+        price = multi["consensus"] or float(df_4h["close"].iloc[-1])
         atr = float(calc_atr(df_4h).iloc[-1])
-        rsi = float(df_4h['rsi'].iloc[-1])
-        nds_4h = analyze_nds(df_4h)
+        rsi = float(df_4h["rsi"].iloc[-1])
+        geo = analyze_nds_geometric(df_4h, df_ltf=df_15m, price=price)
+        higher = geo["bias"]
         fibs = calc_fib(df_4h)
-        last_high = nds_4h.get('last_high')
-        last_low = nds_4h.get('last_low')
         obs = detect_order_blocks(df_4h)
         multi_nds = analyze_nds_multi(symbol, current_price=price)
 
-        higher_list = [r for r in multi_nds if r["interval"] in ["1d", "3d", "1w", "1M", "12h"] and r["ok"]]
-        higher = nds_4h['bias']
-        if higher_list:
-            biases = [r["bias"] for r in higher_list if r["bias"] != "خنثی"]
-            if biases:
-                higher = max(set(biases), key=biases.count)
-
-        buf = create_pro_chart(df_4h, f"𓄂 ηοsτrαμεhrδαδ𓆃 | {symbol} | 4H | {higher}",
-                               fibs=fibs, nds_info=nds_4h, bias=higher, mark_hugs=True)
-
-        caption = (
-            f"🧬 **NDS | {symbol}**\n\n"
-            f"**بایاس غالب:** {higher}\n\n"
-            f"**حمایت و مقاومت پیش‌رو (۴H)**\n"
+        buf = create_pro_chart(
+            df_4h, f"𓄂 ηοsτrαμεhrδαδ𓆃 | {symbol} | 4H | {higher}",
+            fibs=fibs, nds_info=geo, bias=higher, mark_hugs=True, level_86=geo.get("level_86")
         )
-        if last_high: caption += f"• مقاومت: `{last_high:.4f}`\n"
-        if last_low: caption += f"• حمایت: `{last_low:.4f}`\n"
+        caption = (
+            f"🧬 **NDS هندسی | {symbol}**\n\n"
+            f"**بایاس غالب:** {higher} | {geo['cycle']}\n"
+            f"**مجاز به معامله:** {'✅ بله' if geo['trade_allowed'] else '❌ خیر'}\n"
+            f"دلیل: {geo['reason']}\n\n"
+            f"**حمایت/مقاومت پیش‌رو**\n"
+        )
+        if geo.get("last_high"): caption += f"• مقاومت: `{geo['last_high']:.4f}`\n"
+        if geo.get("last_low"): caption += f"• حمایت: `{geo['last_low']:.4f}`\n"
+        if geo.get("level_86"): caption += f"• سطح ۸۶٪ پای: `{geo['level_86']:.4f}`\n"
+        if geo.get("pattern_123"):
+            p = geo["pattern_123"]
+            caption += f"• ۱-۲-۳: `{p.get('kind')}` | p3=`{p.get('p3'):.4f}`\n"
         if obs:
             caption += "\n**اوردر بلاک تقریبی**\n"
             for ob in obs:
                 tag = "صعودی" if ob["type"] == "bullish_ob" else "نزولی"
-                caption += f"• OB {tag}: `{ob['low']:.4f}` – `{ob['high']:.4f}`\n"
+                caption += f"• OB {tag}: `{ob['low']:.4f}`–`{ob['high']:.4f}`\n"
         caption += f"\nRSI: `{rsi:.1f}` | ATR: `{atr:.4f}` | قیمت: `{price:.4f}`\n"
         caption += f"منابع: {format_price_sources(multi)}"
         await update.message.reply_photo(photo=buf, caption=caption, parse_mode="Markdown")
 
-        lines = ["📊 **NDS تایم‌فریم‌ها**\nکف | فاصله% از قیمت آنی | (سقف−کف)\n"]
+        lines = ["📊 **NDS تایم‌فریم‌ها**\nکف | فاصله% | (سقف−کف)\n"]
         for r in multi_nds:
             if not r["ok"]:
                 lines.append(f"• {r['label']}: داده ناکافی")
@@ -1223,17 +1285,9 @@ async def nds_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("\n".join(lines[:mid]), parse_mode="Markdown")
         if len(lines) > mid:
             await update.message.reply_text("\n".join(lines[mid:]), parse_mode="Markdown")
-
-        if higher == "صعودی":
-            cont = "ساختار غالب صعودی است. حمایت‌های پیش‌رو و احتمال پولبک را رصد کنید."
-        elif higher == "نزولی":
-            cont = "ساختار غالب نزولی است. مقاومت‌های پیش‌رو و احتمال پولبک را رصد کنید."
-        else:
-            cont = "ساختار غالب خنثی/رنج است. صبر منطقی‌تر است."
-        await update.message.reply_text(f"📌 **جمع‌بندی**\n{cont}", parse_mode="Markdown")
         await status.delete()
     except Exception as e:
-        await status.edit_text(f"❌ خطا: {str(e)[:100]}")
+        await status.edit_text(f"❌ خطا: {str(e)[:120]}")
 
 async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_private(update): return
@@ -1244,78 +1298,78 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_subscribed(uid) and not is_admin(uid):
         await update.message.reply_text("❌ دسترسی ندارید.")
         return
-
     args = context.args
     symbol = args[0].upper() if args else "BTCUSDT"
     try:
-        margin = float(args[1]) if len(args)>1 else DEFAULT_MARGIN
-        lev = float(args[2]) if len(args)>2 else DEFAULT_LEVERAGE
+        margin = float(args[1]) if len(args) > 1 else DEFAULT_MARGIN
+        lev = float(args[2]) if len(args) > 2 else DEFAULT_LEVERAGE
     except:
         margin, lev = DEFAULT_MARGIN, DEFAULT_LEVERAGE
-
     open_pos = get_open_position(uid)
-    status = await update.message.reply_text(f"⏳ تحلیل سخت‌گیرانه `{symbol}` ...")
-
+    status = await update.message.reply_text(f"⏳ تحلیل NDS هندسی `{symbol}` ...")
     try:
         df_4h = fetch_klines(symbol, "4h", 250)
+        df_15m = fetch_klines(symbol, "15m", 200)
         if df_4h is None or len(df_4h) < 80:
             await status.edit_text("❌ خطا در دریافت داده.")
             return
         df_4h = add_indicators(df_4h)
         multi = get_multi_exchange_prices(symbol)
-        price = multi["consensus"] or float(df_4h['close'].iloc[-1])
-        rsi = float(df_4h['rsi'].iloc[-1])
+        price = multi["consensus"] or float(df_4h["close"].iloc[-1])
+        rsi = float(df_4h["rsi"].iloc[-1])
         atr = float(calc_atr(df_4h).iloc[-1])
-        vol_ratio = float(df_4h['volume'].iloc[-1] / df_4h['volume'].tail(20).mean()) if df_4h['volume'].tail(20).mean() > 0 else 1.0
-        macd_hist = float(df_4h['macd_hist'].iloc[-1]) if 'macd_hist' in df_4h.columns else None
+        vol_ratio = float(df_4h["volume"].iloc[-1] / df_4h["volume"].tail(20).mean()) if df_4h["volume"].tail(20).mean() > 0 else 1.0
+        macd_hist = float(df_4h["macd_hist"].iloc[-1]) if "macd_hist" in df_4h.columns else None
         funding_info = get_funding_info(symbol)
         funding = funding_info["rate"]
         next_fund = funding_info["next_time"]
 
+        geo = analyze_nds_geometric(df_4h, df_ltf=df_15m, price=price)
         multi_nds = analyze_nds_multi(symbol, current_price=price)
-        rets = np.diff(np.log(df_4h['close'].values[-80:]))
+        rets = np.diff(np.log(df_4h["close"].values[-80:]))
         mu, sigma = np.mean(rets), np.std(rets)
-        horizon = 2
-        sims = np.array([price * np.exp(np.cumsum(np.random.normal(mu, sigma, horizon))) for _ in range(40)])
+        sims = np.array([price * np.exp(np.cumsum(np.random.normal(mu, sigma, 2))) for _ in range(40)])
         mean_path = np.mean(sims, axis=0)
         short_bias = mean_path[-1] > price
 
         score, reasons, risks, higher = calculate_signal_score(
-            multi_nds, rsi, funding, vol_ratio, "خنثی", short_bias, macd_hist
+            multi_nds, rsi, funding, vol_ratio, geo["bias"], short_bias, macd_hist, geo
         )
-        nds_4h = analyze_nds(df_4h)
-        obs = detect_order_blocks(df_4h)
-        last_high, last_low = nds_4h.get('last_high'), nds_4h.get('last_low')
 
-        # فقط با امتیاز بالا و هم‌راستایی واقعی سیگنال بده
-        if higher == "صعودی" and score >= MIN_SIGNAL_SCORE and short_bias:
-            direction, signal, is_strong = "LONG", "🟢 LONG", True
-        elif higher == "نزولی" and score >= MIN_SIGNAL_SCORE and not short_bias:
-            direction, signal, is_strong = "SHORT", "🔴 SHORT", True
-        else:
+        # قانون اصلی فلوچارت NDS
+        if not geo.get("trade_allowed") or score < MIN_SIGNAL_SCORE:
             direction, signal, is_strong = None, "⚪️ صبر", False
-            if score < MIN_SIGNAL_SCORE:
-                risks.append(f"امتیاز زیر آستانه سخت‌گیرانه ({score} < {MIN_SIGNAL_SCORE})")
+            if not geo.get("trade_allowed"):
+                risks.append(geo.get("reason") or "تأیید هندسی ناکافی")
+        else:
+            if higher == "صعودی":
+                direction, signal, is_strong = "LONG", "🟢 LONG", True
+            elif higher == "نزولی":
+                direction, signal, is_strong = "SHORT", "🔴 SHORT", True
+            else:
+                direction, signal, is_strong = None, "⚪️ صبر", False
 
         if direction:
             sl, tp = calculate_dollar_sl_tp(
                 price, direction, atr, margin, lev, RISK_PER_TRADE,
-                structure_low=last_low, structure_high=last_high
+                structure_low=geo.get("last_low"), structure_high=geo.get("last_high")
             )
             entry = price
         else:
-            entry, sl, tp = price, price - atr*1.6, price + atr*1.6
+            entry, sl, tp = price, price - atr * 1.6, price + atr * 1.6
 
         position_size = margin * lev
         risk_usd = abs(entry - sl) / entry * position_size if entry else 0
         reward_usd = abs(tp - entry) / entry * position_size if entry else 0
         rr = reward_usd / risk_usd if risk_usd > 0 else 0
-
         fibs = calc_fib(df_4h)
-        buf = create_pro_chart(df_4h, f"𓄂 ηοsτrαμεhrδαδ𓆃 | {symbol} | 4H | {higher}",
-                               fibs=fibs, entry=entry, sl=sl, tp=tp, sims=sims, mean_path=mean_path,
-                               nds_info=nds_4h, bias=higher)
+        obs = detect_order_blocks(df_4h)
 
+        buf = create_pro_chart(
+            df_4h, f"𓄂 ηοsτrαμεhrδαδ𓆃 | {symbol} | 4H | {higher}",
+            fibs=fibs, entry=entry, sl=sl, tp=tp, sims=sims, mean_path=mean_path,
+            nds_info=geo, bias=higher, mark_hugs=True, level_86=geo.get("level_86")
+        )
         base = symbol.replace("USDT", "")
         glass = f"https://www.coinglass.com/currencies/{base}/funding-rate"
         if funding is not None:
@@ -1325,46 +1379,45 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             fund_line = f"[Coinglass]({glass})"
 
         plan = (
-            f"📋 **پلن سخت‌گیرانه | {symbol}**\n\n"
+            f"📋 **پلن NDS هندسی | {symbol}**\n\n"
             f"سیگنال: **{signal}**\n"
-            f"امتیاز قدرت: `{score}/100` (حداقل `{MIN_SIGNAL_SCORE}`)\n"
+            f"امتیاز: `{score}/100` (حداقل `{MIN_SIGNAL_SCORE}`)\n"
             f"ورود: `{entry:.4f}`\nSL: `{sl:.4f}`\nTP: `{tp:.4f}`\n\n"
             f"💵 ریسک: `${risk_usd:.2f}` | سود: `${reward_usd:.2f}` | R:R `1:{rr:.2f}`\n\n"
-            f"**حمایت/مقاومت پیش‌رو**\n"
+            f"**ساختار**\n• بایاس: **{higher}** | {geo.get('cycle')}\n"
+            f"• مجاز: {'✅' if geo.get('trade_allowed') else '❌'} — {geo.get('reason')}\n"
         )
-        if last_high: plan += f"• مقاومت: `{last_high:.4f}`\n"
-        if last_low: plan += f"• حمایت: `{last_low:.4f}`\n"
+        if geo.get("last_high"): plan += f"• مقاومت: `{geo['last_high']:.4f}`\n"
+        if geo.get("last_low"): plan += f"• حمایت: `{geo['last_low']:.4f}`\n"
+        if geo.get("level_86"): plan += f"• سطح ۸۶٪: `{geo['level_86']:.4f}`\n"
+        if geo.get("pattern_123"):
+            p = geo["pattern_123"]
+            plan += f"• ۱-۲-۳: `{p.get('kind')}`\n"
         if obs:
-            plan += "\n**اوردر بلاک تقریبی**\n"
+            plan += "\n**اوردر بلاک**\n"
             for ob in obs:
                 tag = "صعودی" if ob["type"] == "bullish_ob" else "نزولی"
                 plan += f"• OB {tag}: `{ob['low']:.4f}`–`{ob['high']:.4f}`\n"
         plan += f"\n💰 فاندینگ: {fund_line}\n📡 منابع: {format_price_sources(multi)}"
         if open_pos:
-            plan += f"\n\n📌 پوزیشن باز دارید (`{open_pos['symbol']}`)."
-
+            plan += f"\n\n📌 پوزیشن باز: `{open_pos['symbol']}`"
         await update.message.reply_photo(photo=buf, caption=plan, parse_mode="Markdown")
 
         reason_text = "📌 **دلیل سیگنال:**\n"
         reason_text += "\n".join([f"• {r}" for r in reasons]) if reasons else "• تأیید کافی نیست"
         reason_text += "\n\n⚠️ **ریسک‌ها:**\n"
-        reason_text += "\n".join([f"• {r}" for r in risks]) if risks else "• ریسک خاصی شناسایی نشد"
-        reason_text += f"\n\nبایاس غالب: **{higher}**\n"
-        reason_text += "سیگنال فقط با هم‌راستایی چندتایم‌فریم و امتیاز کافی صادر می‌شود."
+        reason_text += "\n".join([f"• {r}" for r in risks]) if risks else "• ریسک خاصی نیست"
+        reason_text += f"\n\nبایاس: **{higher}** | قانون: بدون جهت بالاتر یا بدون ۸۶٪/۱-۲-۳ → صبر"
         await update.message.reply_text(reason_text, parse_mode="Markdown")
 
         if is_strong and direction and not open_pos:
             set_pending_signal(uid, {"symbol": symbol, "direction": direction, "entry": entry, "sl": sl, "tp": tp})
-            await update.message.reply_text(
-                "❓ سیگنال با فیلتر سخت‌گیرانه تأیید شد.\nبرای ثبت: `/confirm`",
-                parse_mode="Markdown"
-            )
+            await update.message.reply_text("❓ سیگنال با فیلتر NDS هندسی.\nثبت: `/confirm`", parse_mode="Markdown")
         elif open_pos:
             await update.message.reply_text("ℹ️ پوزیشن باز دارید. فقط تحلیل نمایش داده شد.")
-
         await status.delete()
     except Exception as e:
-        await status.edit_text(f"❌ خطا: {str(e)[:90]}")
+        await status.edit_text(f"❌ خطا: {str(e)[:120]}")
 
 def main():
     if not BOT_TOKEN:
@@ -1400,8 +1453,8 @@ def main():
     application.add_handler(CommandHandler("removeuser", removeuser))
     application.add_handler(CommandHandler("listusers", listusers))
 
-    print("𓄂 ηοsτrαμεhrδαδ𓆃 آماده | مسیر A کامل")
+    print("𓄂 ηοsτrαμεhrδαδ𓆃 آماده | NDS هندسی + هوک کمانی")
     application.run_polling()
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
