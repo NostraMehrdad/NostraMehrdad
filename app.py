@@ -13,7 +13,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FormatStrFormatter
-from matplotlib.patches import Rectangle, Arc
+from matplotlib.patches import Rectangle, Arc, FancyBboxPatch
 from matplotlib.gridspec import GridSpec
 
 from flask import Flask
@@ -59,8 +59,8 @@ MONITOR_INTERVAL = 120
 DANGER_PERCENT = 0.35
 PULLBACK_ALERT_PCT = 0.012
 MIN_SIGNAL_SCORE = 62
+NDS_86 = 0.864  # سطح رسمی سند: 86.4%
 
-# فقط تایم‌فریم‌های درخواستی برای شرح NDS
 NDS_INTERVALS = [
     ("15m", "۱۵ دقیقه"),
     ("2h", "۲ ساعت"),
@@ -76,7 +76,6 @@ HEADERS = {
 user_last_request = defaultdict(float)
 
 def p1(x):
-    """قیمت با یک رقم اعشار"""
     try:
         return f"{float(x):.1f}"
     except:
@@ -429,6 +428,10 @@ def add_indicators(df):
     df['senkou_b'] = ((df['high'].rolling(52).max() + df['low'].rolling(52).min()) / 2).shift(26)
     df['rsi'] = safe_rsi(df['close'])
     df = add_macd(df)
+    atr = calc_atr(df)
+    df['atr'] = atr
+    df['atr_upper'] = df['close'] + atr
+    df['atr_lower'] = df['close'] - atr
     return df
 
 def calc_fib(df, lookback=100):
@@ -440,9 +443,10 @@ def calc_fib(df, lookback=100):
         '0.5': h - d*0.5, '0.618': h - d*0.618, '0.786': h - d*0.786, '1.0': l
     }
 
-# ===================== NDS هندسی =====================
+# ===================== NDS رسمی (سند Jafarian) =====================
 
-def detect_swing_nodes(df, lb=3, atr_mult=0.8):
+def detect_swing_nodes(df, lb=3, atr_mult=0.75):
+    """Node = نقطه برگشت مومنتوم (high/low matrix 1x2)"""
     if df is None or len(df) < lb * 4 + 10:
         return []
     atr = calc_atr(df).bfill()
@@ -450,60 +454,93 @@ def detect_swing_nodes(df, lb=3, atr_mult=0.8):
     nodes = []
     for i in range(lb, len(df) - lb):
         if hs[i] == max(hs[i - lb:i + lb + 1]) and (hs[i] - min(ls[i - lb:i + 1])) > float(atr.iloc[i]) * atr_mult:
-            nodes.append({"type": "high", "price": float(hs[i]), "index": i})
+            nodes.append({"type": "high", "price": float(hs[i]), "index": i, "role": "N"})
         if ls[i] == min(ls[i - lb:i + lb + 1]) and (max(hs[i - lb:i + 1]) - ls[i]) > float(atr.iloc[i]) * atr_mult:
-            nodes.append({"type": "low", "price": float(ls[i]), "index": i})
+            nodes.append({"type": "low", "price": float(ls[i]), "index": i, "role": "N"})
     nodes.sort(key=lambda x: x["index"])
     return nodes
 
-def build_displacements(nodes):
-    legs = []
-    for i in range(1, len(nodes)):
-        a, b = nodes[i - 1], nodes[i]
-        if a["type"] == b["type"]:
-            continue
-        delta = b["price"] - a["price"]
-        legs.append({
-            "from": a, "to": b, "delta": delta,
-            "direction": "up" if delta > 0 else "down",
-            "abs_move": abs(delta),
-            "start": a["price"], "end": b["price"],
-        })
-    return legs
+def level_864(start_price, end_price):
+    """سطح رسمی 86.4% سند"""
+    return end_price + NDS_86 * (start_price - end_price)
 
-def classify_structure(nodes):
+def count_hh_ll(nodes):
     highs = [n for n in nodes if n["type"] == "high"]
     lows = [n for n in nodes if n["type"] == "low"]
-    if len(highs) < 2 or len(lows) < 2:
-        return "خنثی", "ناقص", None, None
-    lh, ph = highs[-1]["price"], highs[-2]["price"]
-    ll, pl = lows[-1]["price"], lows[-2]["price"]
-    if lh > ph and ll > pl:
-        return "صعودی", "HH+HL", lh, ll
-    if lh < ph and ll < pl:
-        return "نزولی", "LH+LL", lh, ll
-    return "خنثی", "رنج/انتقالی", lh, ll
+    hh = hl = lh = ll = 0
+    for i in range(1, len(highs)):
+        if highs[i]["price"] > highs[i - 1]["price"]:
+            hh += 1
+        else:
+            lh += 1
+    for i in range(1, len(lows)):
+        if lows[i]["price"] > lows[i - 1]["price"]:
+            hl += 1
+        else:
+            ll += 1
+    return hh, hl, lh, ll, highs, lows
 
-def detect_hooks(nodes):
-    """هوک/فلگ ساختاری: H1,H2,... و F1,F2,... روی گره‌های اخیر"""
-    if len(nodes) < 3:
+def detect_open_nodes_direction(nodes):
+    """
+    قانون ۲: جهت بازار با ۲ Node باز (N1, N2)
+    دو سقف بالاتر متوالی → صعودی؛ دو کف پایین‌تر → نزولی
+    """
+    if len(nodes) < 4:
+        return "خنثی", None, None
+    highs = [n for n in nodes if n["type"] == "high"]
+    lows = [n for n in nodes if n["type"] == "low"]
+    if len(highs) >= 2 and len(lows) >= 2:
+        n1h, n2h = highs[-2], highs[-1]
+        n1l, n2l = lows[-2], lows[-1]
+        if n2h["price"] > n1h["price"] and n2l["price"] > n1l["price"]:
+            return "صعودی", n1h, n2h
+        if n2h["price"] < n1h["price"] and n2l["price"] < n1l["price"]:
+            return "نزولی", n1l, n2l
+    return "خنثی", None, None
+
+def detect_hook_structure(nodes):
+    """
+    Hook: الگوی ۳ قله / ۳ دره (Type A/B تقریبی)
+    برچسب H1,H2,... و F1,F2 برای قله/دره
+    """
+    if len(nodes) < 6:
         return []
     hooks = []
-    recent = nodes[-8:]
+    recent = nodes[-10:]
     h_i = l_i = 0
     for n in recent:
         if n["type"] == "high":
             h_i += 1
-            hooks.append({**n, "label": f"H{h_i}", "role": "hook"})
+            hooks.append({**n, "label": f"H{h_i}", "kind": "hook_peak"})
         else:
             l_i += 1
-            hooks.append({**n, "label": f"F{l_i}", "role": "flag"})
+            hooks.append({**n, "label": f"F{l_i}", "kind": "hook_valley"})
     return hooks
 
-def _leg_86(start_price, end_price):
-    return end_price + 0.86 * (start_price - end_price)
+def detect_flag_lvs(df, nodes, lookback=30):
+    """
+    Flag / Low-Volume Spike تقریبی:
+    حرکت تند با حجم نسبی پایین نزدیک انتهای روند
+    """
+    if df is None or len(df) < lookback + 5 or not nodes:
+        return None
+    sub = df.tail(lookback)
+    vol_mean = float(sub["volume"].mean()) or 1.0
+    last = sub.iloc[-1]
+    prev = sub.iloc[-5]
+    move = abs(float(last["close"]) - float(prev["close"]))
+    atr = float(calc_atr(df).iloc[-1] or 0)
+    vol_last = float(sub["volume"].iloc[-3:].mean())
+    if atr > 0 and move > atr * 1.2 and vol_last < vol_mean * 0.85:
+        return {
+            "ok": True,
+            "price": float(last["high"] if last["close"] >= last["open"] else last["low"]),
+            "type": "flag_lvs"
+        }
+    return None
 
 def find_123_pattern(df, direction_bias, lookback=50):
+    """الگوی ۱-۲-۳ برای ورود (قانون سند)"""
     if df is None or len(df) < lookback:
         return None
     sub = df.tail(lookback).reset_index(drop=True)
@@ -521,85 +558,118 @@ def find_123_pattern(df, direction_bias, lookback=50):
                 return {"ok": True, "kind": "123_bear", "p1": n1["price"], "p2": n2["price"], "p3": n3["price"]}
     return None
 
-def analyze_nds_geometric(df_htf, df_ltf=None, price=None):
+def analyze_nds_official(df_htf, df_ltf=None, price=None):
+    """
+    موتور NDS مطابق سند:
+    - جهت از ۲ Node باز تایم بالاتر
+    - سطح 86.4%
+    - Hook / Flag
+    - ورود با ۱۲۳ تایم پایین
+    - SL زیر ۱۲۳ | هدف نزدیک N1/N2
+    """
     result = {
         "bias": "خنثی", "cycle": "—", "trade_allowed": False,
-        "reason": "جهت تایم بالاتر مشخص نیست",
-        "last_high": None, "last_low": None, "nodes": [], "hooks": [], "legs": [],
-        "level_86": None, "level_86_side": None, "pattern_123": None, "entry_zone": None,
-        "tf_low": None, "tf_high": None,
+        "reason": "جهت تایم بالاتر مشخص نیست (قانون ۱ و ۲)",
+        "last_high": None, "last_low": None, "nodes": [], "hooks": [],
+        "level_864": None, "pattern_123": None, "flag": None,
+        "n1": None, "n2": None, "entry_zone": None,
+        "tf_low": None, "tf_high": None, "sl_hint": None, "tp_hint": None,
+        "hh": 0, "ll": 0,
     }
     if df_htf is None or len(df_htf) < 40:
         result["reason"] = "داده تایم بالاتر ناکافی"
         return result
+
     price = float(price if price is not None else df_htf["close"].iloc[-1])
     result["tf_low"] = float(df_htf["low"].tail(80).min())
     result["tf_high"] = float(df_htf["high"].tail(80).max())
-    nodes = detect_swing_nodes(df_htf, lb=3, atr_mult=0.9)
+
+    nodes = detect_swing_nodes(df_htf, lb=3, atr_mult=0.85)
     result["nodes"] = nodes
-    bias, cycle, last_high, last_low = classify_structure(nodes)
+    result["hooks"] = detect_hook_structure(nodes)
+    hh, hl, lh, ll, highs, lows = count_hh_ll(nodes)
+    result["hh"], result["ll"] = hh, ll
+
+    bias, n1, n2 = detect_open_nodes_direction(nodes)
     result["bias"] = bias
-    result["cycle"] = cycle
-    result["last_high"] = last_high
-    result["last_low"] = last_low
-    result["hooks"] = detect_hooks(nodes)
-    legs = build_displacements(nodes)
-    result["legs"] = legs
+    result["n1"] = n1["price"] if n1 else None
+    result["n2"] = n2["price"] if n2 else None
+    if highs:
+        result["last_high"] = highs[-1]["price"]
+    if lows:
+        result["last_low"] = lows[-1]["price"]
 
-    if bias not in ("صعودی", "نزولی"):
-        result["trade_allowed"] = False
-        result["reason"] = "جهت تایم بالاتر روشن نیست → معامله نکن"
-        return result
+    if bias == "صعودی":
+        result["cycle"] = "HH+HL | دو Node باز صعودی"
+    elif bias == "نزولی":
+        result["cycle"] = "LH+LL | دو Node باز نزولی"
+    else:
+        result["cycle"] = "رنج / بدون دو Node باز"
 
-    level_86 = None
-    side = None
-    if legs:
-        if bias == "صعودی":
-            down_legs = [lg for lg in legs if lg["direction"] == "down"]
-            if down_legs:
-                lg = down_legs[-1]
-                level_86 = _leg_86(lg["start"], lg["end"])
-                side = "buy_zone_86"
-        else:
-            up_legs = [lg for lg in legs if lg["direction"] == "up"]
-            if up_legs:
-                lg = up_legs[-1]
-                level_86 = _leg_86(lg["start"], lg["end"])
-                side = "sell_zone_86"
-    result["level_86"] = level_86
-    result["level_86_side"] = side
+    # سطح 86.4% از آخرین پای مخالف
+    level = None
+    if len(nodes) >= 2:
+        a, b = nodes[-2], nodes[-1]
+        if a["type"] != b["type"]:
+            level = level_864(a["price"], b["price"])
+    result["level_864"] = level
+
+    result["flag"] = detect_flag_lvs(df_htf, nodes)
+
+    # قانون ۴: ۳ LL یا ۳ HH نشانه پایان روند
+    end_down = ll >= 3
+    end_up = hh >= 3
 
     pattern = None
-    if df_ltf is not None and len(df_ltf) >= 40:
+    if df_ltf is not None and len(df_ltf) >= 40 and bias in ("صعودی", "نزولی"):
         pattern = find_123_pattern(df_ltf, bias, lookback=50)
         result["pattern_123"] = pattern
 
-    near_86 = False
-    if level_86 is not None and price > 0:
-        near_86 = abs(price - level_86) / price <= 0.015
+    near_864 = False
+    if level is not None and price > 0:
+        near_864 = abs(price - level) / price <= 0.018
 
-    if bias == "صعودی" and (near_86 or (pattern and pattern.get("kind") == "123_bull")):
+    # قوانین ورود
+    if bias not in ("صعودی", "نزولی"):
+        result["trade_allowed"] = False
+        result["reason"] = "قانون ۲: دو Node باز واضح نیست → معامله نکن"
+        return result
+
+    if bias == "صعودی" and (near_864 or (pattern and pattern.get("kind") == "123_bull")):
         result["trade_allowed"] = True
-        result["entry_zone"] = level_86 or (pattern["p3"] if pattern else price)
-        result["reason"] = "جهت بالاتر صعودی + تأیید ۸۶٪/۱-۲-۳"
-    elif bias == "نزولی" and (near_86 or (pattern and pattern.get("kind") == "123_bear")):
+        result["entry_zone"] = pattern["p3"] if pattern else (level or price)
+        result["reason"] = "قانون ۱+۲: جهت بالاتر صعودی + تأیید ۱۲۳/۸۶٫۴٪"
+        if pattern:
+            result["sl_hint"] = pattern["p3"] * 0.997  # کمی زیر ۱۲۳
+            result["tp_hint"] = result["n2"] or result["last_high"]
+    elif bias == "نزولی" and (near_864 or (pattern and pattern.get("kind") == "123_bear")):
         result["trade_allowed"] = True
-        result["entry_zone"] = level_86 or (pattern["p3"] if pattern else price)
-        result["reason"] = "جهت بالاتر نزولی + تأیید ۸۶٪/۱-۲-۳"
+        result["entry_zone"] = pattern["p3"] if pattern else (level or price)
+        result["reason"] = "قانون ۱+۲: جهت بالاتر نزولی + تأیید ۱۲۳/۸۶٫۴٪"
+        if pattern:
+            result["sl_hint"] = pattern["p3"] * 1.003
+            result["tp_hint"] = result["n2"] or result["last_low"]
     else:
         result["trade_allowed"] = False
-        result["reason"] = f"جهت بالاتر {bias}؛ تأیید ۸۶٪ یا ۱-۲-۳ کامل نیست → صبر"
+        extra = ""
+        if end_down:
+            extra = " | نشانه ۳LL (پایان نزول احتمالی)"
+        if end_up:
+            extra = " | نشانه ۳HH (پایان صعود احتمالی)"
+        result["reason"] = f"جهت {bias}؛ هنوز ۱۲۳ یا نزدیکی ۸۶٫۴٪ کامل نیست{extra} → صبر"
+
     return result
 
 def analyze_nds(df):
-    geo = analyze_nds_geometric(df, None, float(df["close"].iloc[-1]) if df is not None and len(df) else None)
+    geo = analyze_nds_official(df, None, float(df["close"].iloc[-1]) if df is not None and len(df) else None)
     return {
         "bias": geo["bias"], "cycle": geo["cycle"],
         "last_high": geo["last_high"], "last_low": geo["last_low"],
         "nodes": geo["nodes"], "hooks": geo["hooks"],
         "tf_low": geo["tf_low"], "tf_high": geo["tf_high"],
-        "level_86": geo["level_86"], "trade_allowed": geo["trade_allowed"],
+        "level_864": geo["level_864"], "trade_allowed": geo["trade_allowed"],
         "reason": geo["reason"], "pattern_123": geo.get("pattern_123"),
+        "n1": geo.get("n1"), "n2": geo.get("n2"),
     }
 
 def analyze_nds_multi(symbol, current_price=None):
@@ -648,15 +718,13 @@ def detect_order_blocks(df, lookback=40):
 def calculate_signal_score(nds_results, rsi, funding, volume_ratio, higher_bias, short_bias, macd_hist=None, geo=None):
     score = 50.0
     reasons, risks = [], []
-
-    # وزن اصلی با ساختار هندسی
     if geo and geo.get("trade_allowed"):
-        score += 18
-        reasons.append(f"NDS هندسی مجاز: {geo.get('reason')}")
+        score += 20
+        reasons.append(f"NDS رسمی: {geo.get('reason')}")
         higher_bias = geo.get("bias") or higher_bias
     elif geo:
         score -= 6
-        risks.append(geo.get("reason") or "تأیید هندسی ناکافی")
+        risks.append(geo.get("reason") or "تأیید NDS ناکافی")
 
     higher_tfs = [r for r in nds_results if r["interval"] in ["1d", "12h", "8h"] and r["ok"]]
     bullish_h = sum(1 for r in higher_tfs if r["bias"] == "صعودی")
@@ -672,10 +740,12 @@ def calculate_signal_score(nds_results, rsi, funding, volume_ratio, higher_bias,
         if higher_bias == "خنثی":
             higher_bias = "نزولی"
 
-    if geo and geo.get("level_86"):
-        reasons.append(f"سطح ۸۶٪: {p1(geo['level_86'])}")
+    if geo and geo.get("level_864"):
+        reasons.append(f"سطح ۸۶٫۴٪: {p1(geo['level_864'])}")
     if geo and geo.get("pattern_123"):
-        reasons.append(f"الگوی ۱-۲-۳: {geo['pattern_123'].get('kind')}")
+        reasons.append(f"۱۲۳: {geo['pattern_123'].get('kind')}")
+    if geo and geo.get("n1") and geo.get("n2"):
+        reasons.append(f"Node باز N1/N2: {p1(geo['n1'])} / {p1(geo['n2'])}")
 
     if 40 <= rsi <= 60:
         score += 4
@@ -719,24 +789,33 @@ def calculate_signal_score(nds_results, rsi, funding, volume_ratio, higher_bias,
 
     return max(0, min(100, round(score, 1))), reasons, risks, higher_bias
 
-def calculate_dollar_sl_tp(entry, direction, atr, margin=5.0, leverage=8, risk_dollar=0.5, structure_low=None, structure_high=None):
+def calculate_dollar_sl_tp(entry, direction, atr, margin=5.0, leverage=8, risk_dollar=0.5,
+                           structure_low=None, structure_high=None, sl_hint=None, tp_hint=None):
     position_size = margin * leverage
     price_risk = (risk_dollar / position_size) * entry
-    atr_distance = atr * 1.6
+    atr_distance = atr * 1.5
     final_distance = max(price_risk, atr_distance * 0.85)
     if direction == "LONG":
         sl = entry - final_distance
-        if structure_low and structure_low < entry:
-            sl = min(sl, structure_low - atr * 0.15)
+        if sl_hint and sl_hint < entry:
+            sl = min(sl, sl_hint)
+        elif structure_low and structure_low < entry:
+            sl = min(sl, structure_low - atr * 0.1)
         tp = entry + final_distance * 2.0
-        if structure_high and structure_high > entry:
+        if tp_hint and tp_hint > entry:
+            tp = max(tp, tp_hint)
+        elif structure_high and structure_high > entry:
             tp = min(tp, structure_high - atr * 0.1) if structure_high - entry > final_distance else tp
     else:
         sl = entry + final_distance
-        if structure_high and structure_high > entry:
-            sl = max(sl, structure_high + atr * 0.15)
+        if sl_hint and sl_hint > entry:
+            sl = max(sl, sl_hint)
+        elif structure_high and structure_high > entry:
+            sl = max(sl, structure_high + atr * 0.1)
         tp = entry - final_distance * 2.0
-        if structure_low and structure_low < entry:
+        if tp_hint and tp_hint < entry:
+            tp = min(tp, tp_hint)
+        elif structure_low and structure_low < entry:
             tp = max(tp, structure_low + atr * 0.1) if entry - structure_low > final_distance else tp
     return round(sl, 1), round(tp, 1)
 
@@ -763,56 +842,61 @@ def draw_hook_arc(ax, x, y, label, is_high=True):
     ax.text(x, ty, label, fontsize=8, ha="center", va="center", color=color, fontweight="bold", zorder=13)
 
 def create_pro_chart(df, title, fibs=None, entry=None, sl=None, tp=None,
-                     sims=None, mean_path=None, level_86=None, show_nds_hooks=False, nds_info=None):
-    """نمودار تحلیل: بدون هوک NDS مگر show_nds_hooks=True"""
+                     sims=None, mean_path=None, level_864=None, show_nds_hooks=False, nds_info=None):
     plot_df = df.tail(100).copy().reset_index(drop=True)
     n = len(plot_df)
-    fig = plt.figure(figsize=(14, 9.4), facecolor="#0d0d0d")
-    gs = GridSpec(4, 1, height_ratios=[3.3, 0.95, 0.95, 0.04], hspace=0.07)
+    fig = plt.figure(figsize=(14, 8.8), facecolor="#0d0d0d")
+    # پنل‌های RSI/MACD کوچک‌تر و شیک‌تر
+    gs = GridSpec(4, 1, height_ratios=[3.6, 0.72, 0.72, 0.03], hspace=0.06)
     ax = fig.add_subplot(gs[0])
     ax_macd = fig.add_subplot(gs[1], sharex=ax)
     ax_rsi = fig.add_subplot(gs[2], sharex=ax)
     for a in [ax, ax_macd, ax_rsi]:
         a.set_facecolor("#0d0d0d")
-        a.tick_params(colors="#cccccc", labelsize=7.2)
+        a.tick_params(colors="#bbbbbb", labelsize=6.5)
         for spine in a.spines.values():
             spine.set_color("#333333")
+        a.yaxis.tick_right()
+        a.yaxis.set_label_position("right")
 
     draw_candles(ax, plot_df)
-    ax.plot(plot_df["sma20"].values, color="#da70d6", lw=1.0, label="MA20", alpha=0.9)
-    ax.plot(plot_df["sma50"].values, color="#ffa500", lw=1.1, label="MA50")
+    ax.plot(plot_df["sma20"].values, color="#da70d6", lw=0.95, label="MA20", alpha=0.9)
+    ax.plot(plot_df["sma50"].values, color="#ffa500", lw=1.05, label="MA50")
     if "sma200" in plot_df.columns:
-        ax.plot(plot_df["sma200"].values, color="#1e90ff", lw=1.15, label="MA200", alpha=0.85)
-    ax.plot(plot_df["ema20"].values, color="#00fa9a", lw=0.95, label="EMA20", alpha=0.85)
-    ax.plot(plot_df["ema50"].values, color="#ff6347", lw=1.0, label="EMA50", alpha=0.85)
-    ax.plot(plot_df["bb_upper"].values, color="#888888", lw=0.8, ls="--", alpha=0.65)
-    ax.plot(plot_df["bb_lower"].values, color="#888888", lw=0.8, ls="--", alpha=0.65)
+        ax.plot(plot_df["sma200"].values, color="#1e90ff", lw=1.1, label="MA200", alpha=0.85)
+    ax.plot(plot_df["ema20"].values, color="#00fa9a", lw=0.9, label="EMA20", alpha=0.85)
+    ax.plot(plot_df["ema50"].values, color="#ff6347", lw=0.95, label="EMA50", alpha=0.85)
+    # ATR نقطه‌چین
+    if "atr_upper" in plot_df.columns:
+        ax.plot(plot_df["atr_upper"].values, color="#aaaaaa", lw=0.85, ls=":", alpha=0.75, label="ATR+")
+        ax.plot(plot_df["atr_lower"].values, color="#aaaaaa", lw=0.85, ls=":", alpha=0.75, label="ATR-")
+    ax.plot(plot_df["bb_upper"].values, color="#666666", lw=0.7, ls="--", alpha=0.55)
+    ax.plot(plot_df["bb_lower"].values, color="#666666", lw=0.7, ls="--", alpha=0.55)
     if "senkou_a" in plot_df.columns:
         ax.fill_between(range(n), plot_df["senkou_a"].values, plot_df["senkou_b"].values,
-                        where=plot_df["senkou_a"] >= plot_df["senkou_b"], color="#00ff7f", alpha=0.11)
+                        where=plot_df["senkou_a"] >= plot_df["senkou_b"], color="#00ff7f", alpha=0.10)
         ax.fill_between(range(n), plot_df["senkou_a"].values, plot_df["senkou_b"].values,
-                        where=plot_df["senkou_a"] < plot_df["senkou_b"], color="#ff69b4", alpha=0.11)
+                        where=plot_df["senkou_a"] < plot_df["senkou_b"], color="#ff69b4", alpha=0.10)
     if fibs:
         colors = {"0.0": "#ffffff", "0.236": "#ff6b6b", "0.382": "#ff9f43", "0.5": "#feca57",
                   "0.618": "#1dd1a1", "0.786": "#54a0ff", "1.0": "#a55eea"}
         for k, v in fibs.items():
             c = colors.get(k, "#aaaaaa")
-            ax.axhline(v, color=c, ls=":", lw=0.85, alpha=0.8)
-            ax.text(n + 1.0, v, f"{k} {p1(v)}", fontsize=6.6, va="center", color=c)
-    if level_86 is not None:
-        ax.axhline(level_86, color="#f1c40f", lw=1.4, ls="-.", alpha=0.95, label="86%")
-        ax.text(n + 1.0, level_86, f"86% {p1(level_86)}", fontsize=7, va="center", color="#f1c40f", fontweight="bold")
-    if entry is not None: ax.axhline(entry, color="#1e90ff", lw=1.25, label="Entry")
-    if sl is not None: ax.axhline(sl, color="#ff4757", lw=1.25, label="SL")
-    if tp is not None: ax.axhline(tp, color="#2ed573", lw=1.25, label="TP")
+            ax.axhline(v, color=c, ls=":", lw=0.8, alpha=0.75)
+            ax.text(n + 0.8, v, f"{k} {p1(v)}", fontsize=6.2, va="center", color=c)
+    if level_864 is not None:
+        ax.axhline(level_864, color="#f1c40f", lw=1.35, ls="-.", alpha=0.95, label="86.4%")
+        ax.text(n + 0.8, level_864, f"86.4% {p1(level_864)}", fontsize=6.8, va="center", color="#f1c40f", fontweight="bold")
+    if entry is not None: ax.axhline(entry, color="#1e90ff", lw=1.2, label="Entry")
+    if sl is not None: ax.axhline(sl, color="#ff4757", lw=1.2, label="SL")
+    if tp is not None: ax.axhline(tp, color="#2ed573", lw=1.2, label="TP")
     if sims is not None and mean_path is not None:
         last = n - 1
         horizon = len(mean_path)
         for s in sims[::3]:
-            ax.plot(range(last, last + horizon), s[:horizon], color="#ffffff", alpha=0.15, lw=0.7)
-        ax.plot(range(last, last + horizon), mean_path, color="#ffffff", lw=1.8, label="Pred 4-6h", zorder=6)
+            ax.plot(range(last, last + horizon), s[:horizon], color="#ffffff", alpha=0.12, lw=0.65)
+        ax.plot(range(last, last + horizon), mean_path, color="#ffffff", lw=1.6, label="Pred 4-6h", zorder=6)
 
-    # هوک فقط وقتی صریحاً خواسته شود (نمودار NDS هفتگی)
     if show_nds_hooks and nds_info:
         hooks = nds_info.get("hooks") or []
         offset = len(df) - n
@@ -822,51 +906,50 @@ def create_pro_chart(df, title, fibs=None, entry=None, sl=None, tp=None,
                 continue
             draw_hook_arc(ax, x, node["price"], node.get("label", "?"), is_high=(node.get("type") == "high"))
 
-    ax.set_title(title, color="white", fontsize=11.5, pad=8)
-    ax.legend(loc="upper left", fontsize=6.5, facecolor="#1a1a1a", edgecolor="#333", labelcolor="white", ncol=3)
-    ax.grid(True, alpha=0.16, color="#444")
-    ax.yaxis.tick_right()
+    ax.set_title(title, color="white", fontsize=11, pad=7)
+    ax.legend(loc="upper left", fontsize=5.8, facecolor="#1a1a1a", edgecolor="#333", labelcolor="white", ncol=4)
+    ax.grid(True, alpha=0.14, color="#444")
     ax.yaxis.set_major_formatter(FormatStrFormatter("%.1f"))
-    ax.set_xlim(-1, n + 12)
+    ax.set_xlim(-1, n + 11)
 
+    # MACD کوچک
     if "macd" in plot_df.columns:
         hist = plot_df["macd_hist"].values
         colors_h = ["#2ed573" if v >= 0 else "#ff4757" for v in hist]
-        ax_macd.bar(range(n), hist, color=colors_h, alpha=0.75, width=0.7)
-        ax_macd.plot(plot_df["macd"].values, color="#00bfff", lw=1.1, label="MACD")
-        ax_macd.plot(plot_df["macd_signal"].values, color="#ffa500", lw=1.0, label="Signal")
-        ax_macd.axhline(0, color="#666", lw=0.7, alpha=0.6)
-        ax_macd.legend(loc="upper left", fontsize=6.2, facecolor="#1a1a1a", labelcolor="white")
-    ax_macd.set_ylabel("MACD", color="#aaaaaa", fontsize=7.2)
-    ax_macd.grid(True, alpha=0.14, color="#444")
+        ax_macd.bar(range(n), hist, color=colors_h, alpha=0.7, width=0.65)
+        ax_macd.plot(plot_df["macd"].values, color="#00bfff", lw=0.95)
+        ax_macd.plot(plot_df["macd_signal"].values, color="#ffa500", lw=0.9)
+        ax_macd.axhline(0, color="#555", lw=0.6, alpha=0.6)
+    ax_macd.set_ylabel("MACD", color="#888888", fontsize=6.5)
+    ax_macd.grid(True, alpha=0.12, color="#444")
+    ax_macd.tick_params(labelbottom=False)
 
-    ax_rsi.plot(plot_df["rsi"].values, color="#e056fd", lw=1.1)
-    ax_rsi.axhline(70, color="#ff4757", ls="--", lw=0.7, alpha=0.6)
-    ax_rsi.axhline(30, color="#2ed573", ls="--", lw=0.7, alpha=0.6)
-    ax_rsi.axhline(50, color="#888888", ls=":", lw=0.6, alpha=0.5)
+    # RSI کوچک
+    ax_rsi.plot(plot_df["rsi"].values, color="#e056fd", lw=0.95)
+    ax_rsi.axhline(70, color="#ff4757", ls="--", lw=0.6, alpha=0.55)
+    ax_rsi.axhline(30, color="#2ed573", ls="--", lw=0.6, alpha=0.55)
+    ax_rsi.axhline(50, color="#666666", ls=":", lw=0.5, alpha=0.45)
     ax_rsi.set_ylim(0, 100)
-    ax_rsi.set_ylabel("RSI", color="#aaaaaa", fontsize=7.2)
-    ax_rsi.grid(True, alpha=0.14, color="#444")
+    ax_rsi.set_ylabel("RSI", color="#888888", fontsize=6.5)
+    ax_rsi.grid(True, alpha=0.12, color="#444")
     plt.setp(ax.get_xticklabels(), visible=False)
     plt.setp(ax_macd.get_xticklabels(), visible=False)
 
     buf = io.BytesIO()
-    plt.savefig(buf, format="png", bbox_inches="tight", dpi=155, facecolor="#0d0d0d")
+    plt.savefig(buf, format="png", bbox_inches="tight", dpi=150, facecolor="#0d0d0d")
     buf.seek(0)
     plt.close()
     return buf
 
 def create_nds_weekly_chart(df, title, geo):
-    """نمودار اختصاصی NDS روی تایم هفتگی با هوک/فلگ کمانی"""
     return create_pro_chart(
         df, title,
         fibs=calc_fib(df, lookback=min(60, len(df))),
-        level_86=geo.get("level_86"),
+        level_864=geo.get("level_864"),
         show_nds_hooks=True,
         nds_info=geo,
     )
-
-# ===================== دستورات =====================
+    # ===================== دستورات تلگرام =====================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_private(update): return
@@ -878,7 +961,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "`/watch` `/watchlist` `/unwatch`\n"
         "`/log` `/performance`\n"
         "`/buy` `/status` `/tools` `/news`\n\n"
-        "📌 ورود به معامله فقط با `/confirm` بعد از سیگنال معتبر",
+        "📌 ورود فقط با `/confirm` بعد از سیگنال معتبر\n"
+        "🧬 NDS رسمی: Node • ۸۶٫۴٪ • Hook/Flag • قانون ۱–۴",
         parse_mode="Markdown"
     )
 
@@ -1235,7 +1319,6 @@ async def nds_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     symbol = context.args[0].upper() if context.args else "BTCUSDT"
     status = await update.message.reply_text(f"⏳ NDS هفتگی `{symbol}` ...")
     try:
-        # نمودار NDS فقط روی تایم هفتگی
         df_1w = fetch_klines(symbol, "1w", 120)
         df_15m = fetch_klines(symbol, "15m", 200)
         if df_1w is None or len(df_1w) < 30:
@@ -1244,7 +1327,7 @@ async def nds_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         df_1w = add_indicators(df_1w)
         multi = get_multi_exchange_prices(symbol)
         price = multi["consensus"] or float(df_1w["close"].iloc[-1])
-        geo = analyze_nds_geometric(df_1w, df_ltf=df_15m, price=price)
+        geo = analyze_nds_official(df_1w, df_ltf=df_15m, price=price)
         higher = geo["bias"]
 
         buf = create_nds_weekly_chart(
@@ -1253,16 +1336,17 @@ async def nds_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             geo
         )
         caption = (
-            f"🧬 **NDS ساختاری | {symbol} | هفتگی**\n\n"
+            f"🧬 **NDS رسمی | {symbol} | هفتگی**\n\n"
             f"بایاس: **{higher}** | {geo['cycle']}\n"
             f"مجاز: {'✅ بله' if geo['trade_allowed'] else '❌ خیر'}\n"
             f"{geo['reason']}\n\n"
             f"مقاومت: `{p1(geo['last_high']) if geo.get('last_high') else '—'}`\n"
             f"حمایت: `{p1(geo['last_low']) if geo.get('last_low') else '—'}`\n"
-            f"سطح ۸۶٪: `{p1(geo['level_86']) if geo.get('level_86') else '—'}`\n"
-            f"قیمت: `{p1(price)}`\n"
-            f"منابع: {format_price_sources(multi)}"
+            f"سطح ۸۶٫۴٪: `{p1(geo['level_864']) if geo.get('level_864') else '—'}`\n"
         )
+        if geo.get("n1") and geo.get("n2"):
+            caption += f"Node باز N1/N2: `{p1(geo['n1'])}` / `{p1(geo['n2'])}`\n"
+        caption += f"قیمت: `{p1(price)}`\nمنابع: {format_price_sources(multi)}"
         if geo.get("hooks"):
             labels = ", ".join([h.get("label", "?") for h in geo["hooks"][-6:]])
             caption += f"\nهوک/فلگ: `{labels}`"
@@ -1319,8 +1403,7 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         funding = funding_info["rate"]
         next_fund = funding_info["next_time"]
 
-        # ساختار هندسی از ۴H + تأیید ۱۵م (نه روی نمودار predict)
-        geo = analyze_nds_geometric(df_4h, df_ltf=df_15m, price=price)
+        geo = analyze_nds_official(df_4h, df_ltf=df_15m, price=price)
         multi_nds = analyze_nds_multi(symbol, current_price=price)
         rets = np.diff(np.log(df_4h["close"].values[-80:]))
         mu, sigma = np.mean(rets), np.std(rets)
@@ -1332,7 +1415,6 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             multi_nds, rsi, funding, vol_ratio, geo["bias"], short_bias, macd_hist, geo
         )
 
-        # سیگنال فقط با مجوز هندسی + امتیاز
         if geo.get("trade_allowed") and higher in ("صعودی", "نزولی") and score >= MIN_SIGNAL_SCORE:
             if higher == "صعودی":
                 direction, signal, is_strong = "LONG", "🟢 LONG", True
@@ -1341,12 +1423,13 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             direction, signal, is_strong = None, "⚪️ صبر", False
             if not geo.get("trade_allowed"):
-                risks.append(geo.get("reason") or "ساختار هندسی هنوز مجوز ورود نداده")
+                risks.append(geo.get("reason") or "ساختار NDS هنوز مجوز ورود نداده")
 
         if direction:
             sl, tp = calculate_dollar_sl_tp(
                 price, direction, atr, margin, lev, RISK_PER_TRADE,
-                structure_low=geo.get("last_low"), structure_high=geo.get("last_high")
+                structure_low=geo.get("last_low"), structure_high=geo.get("last_high"),
+                sl_hint=geo.get("sl_hint"), tp_hint=geo.get("tp_hint")
             )
             entry = round(price, 1)
         else:
@@ -1359,11 +1442,10 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         fibs = calc_fib(df_4h)
         obs = detect_order_blocks(df_4h)
 
-        # نمودار predict بدون هوک NDS
         buf = create_pro_chart(
             df_4h, f"𓄂 ηοsτrαμεhrδαδ𓆃 | {symbol} | 4H | {higher}",
             fibs=fibs, entry=entry, sl=sl, tp=tp, sims=sims, mean_path=mean_path,
-            level_86=geo.get("level_86"), show_nds_hooks=False
+            level_864=geo.get("level_864"), show_nds_hooks=False
         )
 
         base = symbol.replace("USDT", "")
@@ -1380,14 +1462,16 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"SL: `{p1(sl)}`\n"
             f"TP: `{p1(tp)}`\n\n"
             f"💵 ریسک: `${risk_usd:.2f}` | سود: `${reward_usd:.2f}` | R:R `1:{rr:.2f}`\n\n"
-            f"**ساختار**\n"
+            f"**ساختار NDS رسمی**\n"
             f"• بایاس: **{higher}** | {geo.get('cycle')}\n"
-            f"• مجوز NDS: {'✅' if geo.get('trade_allowed') else '❌'}\n"
+            f"• مجوز: {'✅' if geo.get('trade_allowed') else '❌'}\n"
             f"• {geo.get('reason')}\n"
         )
         if geo.get("last_high"): plan += f"• مقاومت: `{p1(geo['last_high'])}`\n"
         if geo.get("last_low"): plan += f"• حمایت: `{p1(geo['last_low'])}`\n"
-        if geo.get("level_86"): plan += f"• سطح ۸۶٪: `{p1(geo['level_86'])}`\n"
+        if geo.get("level_864"): plan += f"• سطح ۸۶٫۴٪: `{p1(geo['level_864'])}`\n"
+        if geo.get("n1") and geo.get("n2"):
+            plan += f"• Node باز N1/N2: `{p1(geo['n1'])}` / `{p1(geo['n2'])}`\n"
         if obs:
             plan += "\n**اوردر بلاک**\n"
             for ob in obs:
@@ -1405,7 +1489,6 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reason_text += "\n".join([f"• {r}" for r in risks]) if risks else "• مورد خاصی نیست"
         await update.message.reply_text(reason_text, parse_mode="Markdown")
 
-        # فرمان ورود واضح
         if is_strong and direction and not open_pos:
             set_pending_signal(uid, {
                 "symbol": symbol, "direction": direction,
@@ -1415,8 +1498,7 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"✅ **سیگنال معتبر**\n\n"
                 f"جهت: **{direction}**\n"
                 f"ورود: `{p1(entry)}` | SL: `{p1(sl)}` | TP: `{p1(tp)}`\n\n"
-                f"👉 برای ثبت معامله همین حالا بزن:\n"
-                f"**`/confirm`**",
+                f"👉 برای ثبت معامله:\n**`/confirm`**",
                 parse_mode="Markdown"
             )
         elif open_pos:
@@ -1462,7 +1544,7 @@ def main():
     application.add_handler(CommandHandler("removeuser", removeuser))
     application.add_handler(CommandHandler("listusers", listusers))
 
-    print("𓄂 ηοsτrαμεhrδαδ𓆃 آماده | NDS هفتگی + /confirm واضح")
+    print("𓄂 ηοsτrαμεhrδαδ𓆃 آماده | NDS رسمی (۸۶٫۴٪ + Node + قانون ۱–۴)")
     application.run_polling()
 
 if __name__ == "__main__":
