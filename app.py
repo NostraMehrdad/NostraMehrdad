@@ -1,6 +1,5 @@
-# 𓄂 ηοsτrαμεhrδαδ𓆃 | Kronos Stable
-# ورود خودکار وجود ندارد — فقط /confirm
-# سیگنال روی کندل ۴H بسته‌شده + نوتیف + سطوح فیبو/MA/BB
+# 𓄂 ηοsτrαμεhrδαδ𓆃 | Kronos Stable — کامل
+# ورود خودکار نیست | سیگنال روی کندل ۴H بسته‌شده | کپشن کوتاه + جزئیات جدا
 import os
 import json
 import threading
@@ -34,7 +33,7 @@ app_web = Flask(__name__)
 
 @app_web.route("/")
 def home():
-    return "𓄂 ηοsτrαμεhrδαδ𓆃 | Kronos Stable | NO auto-entry"
+    return "𓄂 ηοsτrαμεhrδαδ𓆃 | Kronos Stable is active | NO auto-entry"
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -73,6 +72,7 @@ ONCHAIN_CACHE_HOURS = 18
 MIN_TF_ALIGN = 3
 ALT_BTC_BLOCK_SCORE = 80
 SIGNAL_LOCK_HOURS = 3
+CAPTION_MAX = 1000
 
 NDS_INTERVALS = [
     ("15m", "۱۵ دقیقه"),
@@ -89,8 +89,8 @@ HEADERS = {
 user_last_request = defaultdict(float)
 
 DISCLAIMER = (
-    "⚠️ تحلیل آماری است، نه توصیه مالی. ورود خودکار انجام نمی‌شود؛ فقط با دستور شما "
-    "(<code>/confirm</code>). داده عمدتاً عمومی است و با XT.com ممکن است فرق داشته باشد."
+    "⚠️ تحلیل آماری است، نه توصیه مالی. ورود خودکار انجام نمی‌شود؛ "
+    "فقط با دستور شما (<code>/confirm</code>). داده عمدتاً عمومی است و با XT.com ممکن است فرق داشته باشد."
 )
 
 def esc(x):
@@ -145,6 +145,13 @@ def check_rate(uid):
 def is_private(update):
     return update.effective_chat.type == "private"
 
+def clip_caption(text, limit=CAPTION_MAX):
+    if text is None:
+        return ""
+    if len(text) <= limit:
+        return text
+    return text[: limit - 12] + "\n…"
+
 # -------------------- سشن بازار (UTC) --------------------
 
 def get_market_session(now=None):
@@ -152,36 +159,51 @@ def get_market_session(now=None):
     h = now.hour
     if 13 <= h < 16:
         return {
-            "name": "هم‌پوشانی اروپا–آمریکا", "quality": "high",
-            "score_boost": 3, "min_score_extra": 0,
-            "note": "بهترین نقدینگی؛ سیگنال ساختاری معتبرتر.",
+            "name": "هم‌پوشانی اروپا–آمریکا",
+            "name_en": "London-NY Overlap",
+            "quality": "high",
+            "score_boost": 3,
+            "min_score_extra": 0,
+            "note": "بهترین نقدینگی روزانه؛ سیگنال ساختاری معتبرتر است.",
             "utc_hour": h,
         }
     if 16 <= h < 21:
         return {
-            "name": "آمریکا", "quality": "high",
-            "score_boost": 2, "min_score_extra": 0,
-            "note": "حجم بالا؛ روندها معمولاً واضح‌تر.",
+            "name": "آمریکا",
+            "name_en": "US Session",
+            "quality": "high",
+            "score_boost": 2,
+            "min_score_extra": 0,
+            "note": "حجم بالا؛ روندها معمولاً واضح‌ترند.",
             "utc_hour": h,
         }
     if 7 <= h < 13:
         return {
-            "name": "اروپا", "quality": "medium",
-            "score_boost": 1, "min_score_extra": 2,
-            "note": "نقدینگی متوسط؛ قبل از آمریکا احتیاط.",
+            "name": "اروپا",
+            "name_en": "Europe Session",
+            "quality": "medium",
+            "score_boost": 1,
+            "min_score_extra": 2,
+            "note": "نقدینگی متوسط تا خوب؛ قبل از باز شدن آمریکا احتیاط.",
             "utc_hour": h,
         }
     if 0 <= h < 7:
         return {
-            "name": "آسیا", "quality": "medium",
-            "score_boost": 0, "min_score_extra": 4,
-            "note": "اغلب رنج یا حرکت ناپایدار؛ فقط سیگنال خیلی قوی.",
+            "name": "آسیا",
+            "name_en": "Asia Session",
+            "quality": "medium",
+            "score_boost": 0,
+            "min_score_extra": 4,
+            "note": "اغلب رنج یا حرکت‌های ناپایدار؛ فقط سیگنال خیلی قوی.",
             "utc_hour": h,
         }
     return {
-        "name": "پس از آمریکا / کم‌نقدینگی", "quality": "low",
-        "score_boost": -4, "min_score_extra": 8,
-        "note": "نقدینگی کمتر و فیک‌بریک بیشتر؛ آستانه سخت‌تر.",
+        "name": "پس از آمریکا / کم‌نقدینگی",
+        "name_en": "Post-US Thin",
+        "quality": "low",
+        "score_boost": -4,
+        "min_score_extra": 8,
+        "note": "پس از بسته شدن تقریبی آمریکا تا باز شدن آسیا: لغزش و فیک‌بریک بیشتر. ورود فقط با امتیاز خیلی بالا.",
         "utc_hour": h,
     }
 
@@ -189,17 +211,19 @@ def effective_min_score(session):
     return MIN_SIGNAL_SCORE + int(session.get("min_score_extra", 0))
 
 # -------------------- پوزیشن / کاربران --------------------
-# ورود خودکار هرگز انجام نمی‌شود — فقط set_open_position از /confirm
+# ورود خودکار هرگز: فقط set_open_position از /confirm
 
 def get_open_position(uid):
     return load_json(POSITION_FILE).get(str(uid))
 
 def set_open_position(uid, symbol, direction, entry, sl, tp):
-    """فقط از /confirm صدا زده می‌شود — هیچ مسیر خودکاری به اینجا وصل نیست."""
     data = load_json(POSITION_FILE)
     data[str(uid)] = {
-        "symbol": symbol, "direction": direction,
-        "entry": entry, "sl": sl, "tp": tp,
+        "symbol": symbol,
+        "direction": direction,
+        "entry": entry,
+        "sl": sl,
+        "tp": tp,
         "opened_at": datetime.now(timezone.utc).isoformat(),
         "manual_confirm": True,
     }
@@ -332,7 +356,6 @@ def mark_notified(uid, symbol, candle_close_ts):
     data = load_json(NOTIFIED_SIGNAL_FILE)
     key = f"{uid}:{symbol}:{candle_close_ts}"
     data[key] = datetime.now(timezone.utc).isoformat()
-    # پاکسازی قدیمی
     if len(data) > 500:
         items = sorted(data.items(), key=lambda x: x[1])
         data = dict(items[-300:])
@@ -351,7 +374,10 @@ def get_binance_price(symbol):
     return None
 
 def get_multi_exchange_prices(symbol):
-    result = {"binance": None, "coinbase": None, "kraken": None, "consensus": None, "spread_pct": None, "sources_ok": 0}
+    result = {
+        "binance": None, "coinbase": None, "kraken": None,
+        "consensus": None, "spread_pct": None, "sources_ok": 0,
+    }
     result["binance"] = get_binance_price(symbol)
     if not CCXT_AVAILABLE:
         result["consensus"] = result["binance"]
@@ -400,7 +426,7 @@ def format_price_sources(multi):
 
 def get_funding_info(symbol):
     result = {"rate": None, "next_time": None, "mark": None, "source": None, "detail": {}}
-    pair = f"{symbol.replace('USDT','')}/USDT:USDT"
+    pair = f"{symbol.replace('USDT', '')}/USDT:USDT"
     try:
         url = f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={symbol}"
         r = requests.get(url, headers=HEADERS, timeout=8)
@@ -410,7 +436,9 @@ def get_funding_info(symbol):
             result["mark"] = float(d.get("markPrice", 0) or 0) or None
             next_ts = d.get("nextFundingTime")
             if next_ts:
-                result["next_time"] = datetime.fromtimestamp(int(next_ts) / 1000, tz=timezone.utc).strftime("%H:%M UTC")
+                result["next_time"] = datetime.fromtimestamp(
+                    int(next_ts) / 1000, tz=timezone.utc
+                ).strftime("%H:%M UTC")
             result["source"] = "Binance"
             result["detail"]["binance"] = result["rate"]
             return result
@@ -429,12 +457,14 @@ def get_funding_info(symbol):
                         result["source"] = name.capitalize()
                         ts = r.get("fundingTimestamp") or r.get("nextFundingTimestamp")
                         if ts:
-                            result["next_time"] = datetime.fromtimestamp(int(ts) / 1000, tz=timezone.utc).strftime("%H:%M UTC")
+                            result["next_time"] = datetime.fromtimestamp(
+                                int(ts) / 1000, tz=timezone.utc
+                            ).strftime("%H:%M UTC")
             except Exception as e:
                 print(f"Funding {name}:", e)
     return result
 
-# -------------------- آن‌چین --------------------
+# -------------------- آن‌چین BTC --------------------
 
 def _load_onchain_cache():
     data = load_json(ONCHAIN_CACHE_FILE)
@@ -468,6 +498,7 @@ def fetch_explore21_realized():
             "btc_close": float(row["btc_close_usd"]) if row.get("btc_close_usd") is not None else None,
             "source": "Explore21",
             "chart": "https://charts.explore21.com/bitcoin-realized-price",
+            "block": j.get("as_of_block"),
         }
     except Exception as e:
         print("Explore21:", e)
@@ -489,6 +520,7 @@ def fetch_coinglass_lth():
         lth = last.get("lth_realized_price") or last.get("lthRealizedPrice")
         return {
             "lth_realized_price": float(lth) if lth is not None else None,
+            "price": float(last.get("price") or 0) or None,
             "source": "CoinGlass",
         }
     except Exception as e:
@@ -509,9 +541,11 @@ def get_btc_onchain_realized(live_price=None):
     lth_mvrv = (px / lth) if (px and lth and lth > 0) else None
     overall_mvrv = (px / rp) if (px and rp and rp > 0) else None
     notes = []
+    bias_hint = "خنثی"
     if sth_mvrv is not None:
         if sth_mvrv < 0.95:
-            notes.append(f"STH زیر هزینه (MVRV {sth_mvrv:.2f})")
+            notes.append(f"STH زیر هزینه خرید (MVRV {sth_mvrv:.2f})")
+            bias_hint = "احتیاط_نزولی_کوتاه"
         elif sth_mvrv > 1.15:
             notes.append(f"STH در سود (MVRV {sth_mvrv:.2f})")
         else:
@@ -519,8 +553,11 @@ def get_btc_onchain_realized(live_price=None):
     if lth_mvrv is not None:
         if lth_mvrv < 1.05:
             notes.append(f"LTH نزدیک سربه‌سر (MVRV {lth_mvrv:.2f})")
+            if lth_mvrv < 1.0:
+                bias_hint = "حمایت_چرخه_ای"
         elif lth_mvrv > 2.5:
-            notes.append(f"LTH MVRV بالا ({lth_mvrv:.2f})")
+            notes.append(f"LTH MVRV بالا ({lth_mvrv:.2f}) — ریسک توزیع")
+            bias_hint = "احتیاط_توزیع"
         else:
             notes.append(f"LTH در سود معقول (MVRV {lth_mvrv:.2f})")
     else:
@@ -535,12 +572,14 @@ def get_btc_onchain_realized(live_price=None):
         "sth_mvrv": round(sth_mvrv, 3) if sth_mvrv is not None else None,
         "lth_mvrv": round(lth_mvrv, 3) if lth_mvrv is not None else None,
         "overall_mvrv": round(overall_mvrv, 3) if overall_mvrv is not None else None,
+        "bias_hint": bias_hint,
         "notes": notes,
         "sources": {
             "explore21": base.get("source"),
             "coinglass": lth_data.get("source"),
             "chart": base.get("chart") or "https://charts.explore21.com/bitcoin-realized-price",
         },
+        "block": base.get("block"),
     }
     if payload["ok"]:
         _save_onchain_cache(payload)
@@ -561,30 +600,20 @@ def format_onchain_html(oc):
         m = f" | MVRV <code>{oc['lth_mvrv']}</code>" if oc.get("lth_mvrv") is not None else ""
         lines.append(f"LTH RP: <code>{p1(oc['lth_realized_price'])}</code>{m}")
     else:
-        lines.append("LTH RP: —")
+        lines.append("LTH RP: — (اختیاری: COINGLASS_API_KEY)")
+    if oc.get("realized_price"):
+        m = f" | MVRV <code>{oc['overall_mvrv']}</code>" if oc.get("overall_mvrv") is not None else ""
+        lines.append(f"Realized کلی: <code>{p1(oc['realized_price'])}</code>{m}")
     if oc.get("notes"):
         lines.append("\n<b>تفسیر:</b>")
         for n in oc["notes"][:5]:
             lines.append(f"• {esc(n)}")
+    chart = (oc.get("sources") or {}).get("chart")
+    if chart:
+        lines.append(f'\n<a href="{chart}">Explore21</a>')
     return "\n".join(lines)
 
-# -------------------- کندل ۴H بسته‌شده --------------------
-
-def closed_klines(df):
-    """آخرین کندل معمولاً هنوز باز است — برای سیگنال حذف می‌شود."""
-    if df is None or len(df) < 3:
-        return df
-    return df.iloc[:-1].copy()
-
-def last_closed_candle_ts(df_full):
-    """timestamp بسته شدن آخرین کندل کامل (میلی‌ثانیه open_time کندل حذف‌شده قبلی)."""
-    if df_full is None or len(df_full) < 2:
-        return None
-    try:
-        # open_time کندل آخرِ بسته‌شده = ردیف -2 در df کامل، یا -1 در closed
-        return int(df_full["open_time"].iloc[-2])
-    except Exception:
-        return None
+# -------------------- مانیتور --------------------
 
 def monitor_positions(bot: Bot):
     while True:
@@ -639,19 +668,31 @@ def monitor_positions(bot: Bot):
                         pullback = entry > 0 and (price - entry) / entry >= PULLBACK_ALERT_PCT and price < sl
                     if danger and not user_alerts.get("sl_warned"):
                         try:
-                            bot.send_message(chat_id=uid, text=f"⚠️ نزدیک SL | <code>{esc(symbol)}</code> {p1(price)}", parse_mode="HTML")
+                            bot.send_message(
+                                chat_id=uid,
+                                text=f"⚠️ نزدیک SL | <code>{esc(symbol)}</code> {p1(price)}",
+                                parse_mode="HTML",
+                            )
                             user_alerts["sl_warned"] = True
                         except Exception:
                             pass
                     if near_tp and not user_alerts.get("tp_warned"):
                         try:
-                            bot.send_message(chat_id=uid, text=f"🎯 نزدیک TP | <code>{esc(symbol)}</code> {p1(price)}", parse_mode="HTML")
+                            bot.send_message(
+                                chat_id=uid,
+                                text=f"🎯 نزدیک TP | <code>{esc(symbol)}</code> {p1(price)}",
+                                parse_mode="HTML",
+                            )
                             user_alerts["tp_warned"] = True
                         except Exception:
                             pass
                     if pullback and not user_alerts.get("pullback_warned"):
                         try:
-                            bot.send_message(chat_id=uid, text=f"🔄 پولبک | <code>{esc(symbol)}</code> {p1(price)}", parse_mode="HTML")
+                            bot.send_message(
+                                chat_id=uid,
+                                text=f"🔄 پولبک | <code>{esc(symbol)}</code> {p1(price)}",
+                                parse_mode="HTML",
+                            )
                             user_alerts["pullback_warned"] = True
                         except Exception:
                             pass
@@ -660,7 +701,7 @@ def monitor_positions(bot: Bot):
                     print("Monitor pos:", e)
             save_json(ALERT_STATE_FILE, alerts)
 
-            # نوتیف سیگنال معلق (ورود خودکار نیست — فقط یادآوری confirm)
+            # نوتیف سیگنال معلق — ورود خودکار نیست
             pendings = load_json(PENDING_FILE)
             for uid_str, pend in list(pendings.items()):
                 try:
@@ -672,7 +713,6 @@ def monitor_positions(bot: Bot):
                         continue
                     if was_notified(uid, pend["symbol"], c_ts):
                         continue
-                    # یادآوری یک‌بار
                     mark_notified(uid, pend["symbol"], c_ts)
                     try:
                         bot.send_message(
@@ -683,8 +723,8 @@ def monitor_positions(bot: Bot):
                                 f"ورود پیشنهادی <code>{p1(pend['entry'])}</code> | "
                                 f"SL <code>{p1(pend['sl'])}</code> | TP <code>{p1(pend['tp'])}</code>\n\n"
                                 f"⛔ ورود خودکار انجام <b>نمی‌شود</b>.\n"
-                                f"اگر موافقی: <code>/confirm</code>\n"
-                                f"اگر نه: نادیده بگیر یا <code>/close</code> برای پاک کردن وضعیت."
+                                f"اگر موافقی فقط برای ثبت ژورنال ربات: <code>/confirm</code>\n"
+                                f"سفارش روی XT.com را خودتان می‌زنید."
                             ),
                             parse_mode="HTML",
                         )
@@ -746,6 +786,20 @@ def fetch_klines(symbol, interval, limit=300):
         print("Fetch:", e)
     return None
 
+def closed_klines(df):
+    """آخرین کندل معمولاً هنوز باز است — برای سیگنال حذف می‌شود."""
+    if df is None or len(df) < 3:
+        return df
+    return df.iloc[:-1].copy()
+
+def last_closed_candle_ts(df_full):
+    if df_full is None or len(df_full) < 2:
+        return None
+    try:
+        return int(df_full["open_time"].iloc[-2])
+    except Exception:
+        return None
+
 def safe_rsi(series, period=14):
     delta = series.diff()
     gain = delta.where(delta > 0, 0).rolling(period).mean()
@@ -800,22 +854,31 @@ def calc_fib(df, lookback=100):
     l = df["low"].tail(lookback).min()
     d = h - l
     return {
-        "0.0": h, "0.236": h - d * 0.236, "0.382": h - d * 0.382,
-        "0.5": h - d * 0.5, "0.618": h - d * 0.618, "0.786": h - d * 0.786, "1.0": l,
+        "0.0": h,
+        "0.236": h - d * 0.236,
+        "0.382": h - d * 0.382,
+        "0.5": h - d * 0.5,
+        "0.618": h - d * 0.618,
+        "0.786": h - d * 0.786,
+        "1.0": l,
     }
 
 def format_levels_block(price, df, fibs, geo):
     lines = ["📐 <b>سطوح پیش‌رو (۴H بسته‌شده)</b>"]
     last = df.iloc[-1]
-    for name, key in [("SMA20", "sma20"), ("SMA50", "sma50"), ("SMA200", "sma200"),
-                      ("EMA20", "ema20"), ("EMA50", "ema50")]:
+    for name, key in [
+        ("SMA20", "sma20"), ("SMA50", "sma50"), ("SMA200", "sma200"),
+        ("EMA20", "ema20"), ("EMA50", "ema50"),
+    ]:
         if key in df.columns and pd.notna(last.get(key)):
             v = float(last[key])
             dist = (price - v) / price * 100
             side = "بالای" if price > v else "زیر"
             lines.append(f"• {name}: <code>{p1(v)}</code> ({side} | {dist:+.2f}%)")
     if "bb_upper" in df.columns and pd.notna(last.get("bb_upper")):
-        up, mid, lo = float(last["bb_upper"]), float(last["bb_mid"]), float(last["bb_lower"])
+        up = float(last["bb_upper"])
+        mid = float(last["bb_mid"])
+        lo = float(last["bb_lower"])
         lines.append(f"• BB Upper <code>{p1(up)}</code> | Mid <code>{p1(mid)}</code> | Lower <code>{p1(lo)}</code>")
         if up > lo:
             pos = (price - lo) / (up - lo) * 100
@@ -824,11 +887,11 @@ def format_levels_block(price, df, fibs, geo):
         below = sorted([(k, v) for k, v in fibs.items() if v < price], key=lambda x: -x[1])[:2]
         above = sorted([(k, v) for k, v in fibs.items() if v > price], key=lambda x: x[1])[:2]
         if above:
-            lines.append("<b>فیبو مقاومت</b>")
+            lines.append("<b>فیبو مقاومت پیش‌رو</b>")
             for k, v in above:
                 lines.append(f"• {k}: <code>{p1(v)}</code> ({(v - price) / price * 100:+.2f}%)")
         if below:
-            lines.append("<b>فیبو حمایت</b>")
+            lines.append("<b>فیبو حمایت پیش‌رو</b>")
             for k, v in below:
                 lines.append(f"• {k}: <code>{p1(v)}</code> ({(v - price) / price * 100:+.2f}%)")
     if geo.get("level_864"):
@@ -875,7 +938,10 @@ def count_tf_alignment(nds_results):
     higher_bear = sum(1 for r in higher if r.get("bias") == "نزولی")
     higher_bias = "صعودی" if higher_bull > higher_bear else "نزولی" if higher_bear > higher_bull else "خنثی"
     return {
-        "bull": bull, "bear": bear,
+        "bull": bull,
+        "bear": bear,
+        "neutral": sum(1 for r in ok if r.get("bias") == "خنثی"),
+        "total_ok": len(ok),
         "higher_bias": higher_bias,
         "align_long_ok": bull >= MIN_TF_ALIGN and higher_bias != "نزولی",
         "align_short_ok": bear >= MIN_TF_ALIGN and higher_bias != "صعودی",
@@ -887,16 +953,20 @@ def get_btc_structure_bias():
         df_1d = fetch_klines("BTCUSDT", "1d", 80)
         if df_4h is None or len(df_4h) < 50:
             return {"bias": "خنثی", "detail": "داده BTC ناکافی"}
-        df_4h_c = closed_klines(df_4h)
-        g4 = analyze_nds(df_4h_c)
+        g4 = analyze_nds(closed_klines(df_4h))
         gd = analyze_nds(closed_klines(df_1d)) if df_1d is not None and len(df_1d) >= 40 else {"bias": "خنثی"}
         bias = gd["bias"] if gd.get("bias") in ("صعودی", "نزولی") else g4.get("bias", "خنثی")
-        return {"bias": bias, "detail": f"BTC 1D:{gd.get('bias')} | 4H:{g4.get('bias')}"}
+        return {
+            "bias": bias,
+            "bias_4h": g4.get("bias"),
+            "bias_1d": gd.get("bias"),
+            "detail": f"BTC 1D:{gd.get('bias')} | 4H:{g4.get('bias')}",
+        }
     except Exception as e:
         print("BTC structure:", e)
         return {"bias": "خنثی", "detail": "خطا"}
 
-# ===================== NDS =====================
+# ===================== NDS رسمی =====================
 
 def detect_swing_nodes(df, lb=3, atr_mult=0.75):
     if df is None or len(df) < lb * 4 + 10:
@@ -905,9 +975,9 @@ def detect_swing_nodes(df, lb=3, atr_mult=0.75):
     hs, ls = df["high"].values, df["low"].values
     nodes = []
     for i in range(lb, len(df) - lb):
-        if hs[i] == max(hs[i - lb : i + lb + 1]) and (hs[i] - min(ls[i - lb : i + 1])) > float(atr.iloc[i]) * atr_mult:
+        if hs[i] == max(hs[i - lb: i + lb + 1]) and (hs[i] - min(ls[i - lb: i + 1])) > float(atr.iloc[i]) * atr_mult:
             nodes.append({"type": "high", "price": float(hs[i]), "index": i})
-        if ls[i] == min(ls[i - lb : i + lb + 1]) and (max(hs[i - lb : i + 1]) - ls[i]) > float(atr.iloc[i]) * atr_mult:
+        if ls[i] == min(ls[i - lb: i + lb + 1]) and (max(hs[i - lb: i + 1]) - ls[i]) > float(atr.iloc[i]) * atr_mult:
             nodes.append({"type": "low", "price": float(ls[i]), "index": i})
     nodes.sort(key=lambda x: x["index"])
     return nodes
@@ -973,7 +1043,11 @@ def detect_flag_lvs(df, nodes, lookback=30):
     atr = float(calc_atr(df).iloc[-1] or 0)
     vol_last = float(sub["volume"].iloc[-3:].mean())
     if atr > 0 and move > atr * 1.2 and vol_last < vol_mean * 0.85:
-        return {"ok": True, "price": float(last["high"] if last["close"] >= last["open"] else last["low"]), "type": "flag_lvs"}
+        return {
+            "ok": True,
+            "price": float(last["high"] if last["close"] >= last["open"] else last["low"]),
+            "type": "flag_lvs",
+        }
     return None
 
 def find_123_pattern(df, direction_bias, lookback=50):
@@ -1048,7 +1122,10 @@ def analyze_nds_official(df_htf, df_ltf=None, price=None):
         near_864 = abs(price - level) / price <= 0.018
     if bias not in ("صعودی", "نزولی"):
         result["trade_allowed"] = False
-        result["reason"] = "قانون ۲: دو Node باز واضح نیست"
+        if result["expected_move_pct"] >= MIN_RANGE_MOVE_PCT and (near_864 or pattern):
+            result["reason"] = f"رنج؛ حرکت {result['expected_move_pct']:.1f}% ≥ ۳٪ — نیاز جهت واضح"
+        else:
+            result["reason"] = "قانون ۲: دو Node باز واضح نیست"
         return result
     if bias == "صعودی" and (near_864 or (pattern and pattern.get("kind") == "123_bull")):
         if result["expected_move_pct"] < MIN_RANGE_MOVE_PCT and not (pattern and near_864):
@@ -1078,7 +1155,10 @@ def analyze_nds_official(df_htf, df_ltf=None, price=None):
     return result
 
 def analyze_nds(df):
-    geo = analyze_nds_official(df, None, float(df["close"].iloc[-1]) if df is not None and len(df) else None)
+    geo = analyze_nds_official(
+        df, None,
+        float(df["close"].iloc[-1]) if df is not None and len(df) else None,
+    )
     return {
         "bias": geo["bias"], "cycle": geo["cycle"],
         "last_high": geo["last_high"], "last_low": geo["last_low"],
@@ -1095,18 +1175,20 @@ def analyze_nds_multi(symbol, current_price=None):
         limit = 200 if interval == "1d" else 150
         df = fetch_klines(symbol, interval, limit)
         if df is None or len(df) < 50:
-            results.append({"interval": interval, "label": label, "bias": "—", "ok": False})
+            results.append({"interval": interval, "label": label, "bias": "—", "cycle": "داده ناکافی", "ok": False})
             continue
         df_c = closed_klines(df) if interval in ("4h", "1d", "12h", "8h") else df
         info = analyze_nds(df_c if df_c is not None and len(df_c) >= 40 else df)
         tf_low, tf_high = info.get("tf_low"), info.get("tf_high")
-        dist_pct = None
+        dist_pct = range_val = None
         if tf_low is not None and current_price:
             dist_pct = (current_price - tf_low) / current_price * 100
+        if tf_low is not None and tf_high is not None:
+            range_val = tf_high - tf_low
         results.append({
             "interval": interval, "label": label, "bias": info["bias"], "cycle": info["cycle"],
             "last_high": info.get("last_high"), "last_low": info.get("last_low"),
-            "tf_low": tf_low, "tf_high": tf_high, "dist_pct": dist_pct, "ok": True,
+            "tf_low": tf_low, "tf_high": tf_high, "dist_pct": dist_pct, "range_val": range_val, "ok": True,
         })
     return results
 
@@ -1123,9 +1205,9 @@ def detect_order_blocks(df, lookback=40):
             continue
         if body > atr * 0.8 and body / rng > 0.55:
             direction = "bullish" if sub["close"].iloc[i] > sub["open"].iloc[i] else "bearish"
-            if direction == "bullish" and sub["low"].iloc[i + 1 : i + 3].min() >= sub["low"].iloc[i] * 0.998:
+            if direction == "bullish" and sub["low"].iloc[i + 1: i + 3].min() >= sub["low"].iloc[i] * 0.998:
                 blocks.append({"type": "bullish_ob", "low": float(sub["low"].iloc[i]), "high": float(sub["high"].iloc[i])})
-            if direction == "bearish" and sub["high"].iloc[i + 1 : i + 3].max() <= sub["high"].iloc[i] * 1.002:
+            if direction == "bearish" and sub["high"].iloc[i + 1: i + 3].max() <= sub["high"].iloc[i] * 1.002:
                 blocks.append({"type": "bearish_ob", "low": float(sub["low"].iloc[i]), "high": float(sub["high"].iloc[i])})
     return blocks[-3:]
 
@@ -1136,6 +1218,7 @@ def calculate_signal_score(
 ):
     score = 50.0
     reasons, risks = [], []
+
     if session:
         reasons.append(f"سشن: {session['name']} (UTC {session['utc_hour']:02d}) | کیفیت {session['quality']}")
         score += float(session.get("score_boost", 0))
@@ -1143,6 +1226,7 @@ def calculate_signal_score(
             risks.append(session["note"])
         else:
             reasons.append(session["note"])
+
     if geo and geo.get("trade_allowed"):
         score += 18
         reasons.append(f"NDS: {geo.get('reason')}")
@@ -1150,8 +1234,11 @@ def calculate_signal_score(
     elif geo:
         score -= 6
         risks.append(geo.get("reason") or "NDS ناکافی")
+
     if tf_align:
-        reasons.append(f"TF: صعودی {tf_align['bull']}/۶ | نزولی {tf_align['bear']}/۶ | بالاتر: {tf_align['higher_bias']}")
+        reasons.append(
+            f"TF: صعودی {tf_align['bull']}/۶ | نزولی {tf_align['bear']}/۶ | بالاتر: {tf_align['higher_bias']}"
+        )
         if higher_bias == "صعودی":
             if tf_align["align_long_ok"]:
                 score += 12
@@ -1166,30 +1253,41 @@ def calculate_signal_score(
             else:
                 score -= 10
                 risks.append("هم‌راستایی SHORT ناکافی")
+
     if regime_info:
         reg = regime_info.get("regime", "نامشخص")
-        reasons.append(f"رژیم: {reg} | ATR {regime_info.get('atr_pct')}% | Vol {regime_info.get('vol_ratio')}x")
+        reasons.append(
+            f"رژیم: {reg} | ATR {regime_info.get('atr_pct')}% | Vol {regime_info.get('vol_ratio')}x"
+        )
         if reg == "رنج":
             if volume_ratio is not None and volume_ratio < 1.15:
                 score -= 8
                 risks.append("رنج + حجم ضعیف")
             if geo and geo.get("expected_move_pct", 0) < MIN_RANGE_MOVE_PCT:
                 score -= 5
+                risks.append(f"حرکت مورد انتظار < {MIN_RANGE_MOVE_PCT}%")
         elif reg == "رونددار":
             score += 4
+            reasons.append("رژیم رونددار")
         elif reg == "پرنوسان":
             score -= 4
             risks.append("رژیم پرنوسان")
+
     if is_alt and btc_bias:
         bb = btc_bias.get("bias", "خنثی")
-        reasons.append(f"BTC ساختاری: {bb}")
+        reasons.append(f"BTC ساختاری: {bb} ({btc_bias.get('detail', '')})")
         if bb == "نزولی" and higher_bias == "صعودی":
             score -= 12
             risks.append("BTC نزولی — لانگ آلت پرریسک")
         elif bb == "صعودی" and higher_bias == "صعودی":
             score += 3
+            reasons.append("BTC و آلت هم‌جهت صعودی")
+
     if geo and geo.get("level_864"):
         reasons.append(f"سطح ۸۶٫۴٪: {p1(geo['level_864'])}")
+    if geo and geo.get("pattern_123"):
+        reasons.append(f"۱۲۳: {geo['pattern_123'].get('kind')}")
+
     if 40 <= rsi <= 60:
         score += 4
         reasons.append(f"RSI متعادل ({rsi:.1f})")
@@ -1199,18 +1297,21 @@ def calculate_signal_score(
     elif rsi < 28:
         score -= 8
         risks.append(f"RSI اشباع فروش ({rsi:.1f})")
+
     if funding is not None:
         if abs(funding) > 0.08:
             score -= 3
             risks.append(f"فاندینگ افراطی ({funding:.4f}%)")
         else:
             reasons.append(f"فاندینگ ({funding:.4f}%)")
+
     if volume_ratio is not None:
         if volume_ratio >= 1.15:
             score += 3
         elif volume_ratio < 0.55:
             score -= 3
             risks.append(f"حجم ضعیف ({volume_ratio:.2f}x)")
+
     if macd_hist is not None and higher_bias in ("صعودی", "نزولی"):
         if (higher_bias == "صعودی" and macd_hist > 0) or (higher_bias == "نزولی" and macd_hist < 0):
             score += 4
@@ -1218,6 +1319,7 @@ def calculate_signal_score(
         else:
             score -= 2
             risks.append("MACD خلاف بایاس")
+
     reasons.append("مبنای سیگنال: کندل ۴H بسته‌شده")
     return max(0, min(100, round(score, 1))), reasons, risks, higher_bias
 
@@ -1256,22 +1358,29 @@ def calculate_dollar_sl_tp(
 # -------------------- نمودار --------------------
 
 def draw_candles(ax, df, width=0.55):
-    opens, highs, lows, closes = df["open"].values, df["high"].values, df["low"].values, df["close"].values
+    opens = df["open"].values
+    highs = df["high"].values
+    lows = df["low"].values
+    closes = df["close"].values
     for i in range(len(df)):
         color = "#2ed573" if closes[i] >= opens[i] else "#ff4757"
         ax.plot([i, i], [lows[i], highs[i]], color=color, lw=0.85, zorder=3)
         bottom = min(opens[i], closes[i])
         height = abs(closes[i] - opens[i]) or (highs[i] - lows[i]) * 0.02 or 1e-8
-        ax.add_patch(Rectangle((i - width / 2, bottom), width, height, facecolor=color, edgecolor=color, lw=0.35, zorder=4))
+        ax.add_patch(
+            Rectangle((i - width / 2, bottom), width, height, facecolor=color, edgecolor=color, lw=0.35, zorder=4)
+        )
 
 def draw_hook_marker(ax, x, y, label, is_high=True):
     color = "#ff4757" if is_high else "#1dd1a1"
     size = max(abs(y) * 0.008, 0.8)
     ax.scatter([x], [y], s=55, c=color, marker="s", zorder=15, edgecolors="white", linewidths=0.6)
     ty = y + size * 3.5 if is_high else y - size * 3.5
-    ax.annotate(label, xy=(x, y), xytext=(x, ty), fontsize=7.5, ha="center", va="center",
-                color=color, fontweight="bold", zorder=16,
-                arrowprops=dict(arrowstyle="-", color=color, lw=0.8, alpha=0.7))
+    ax.annotate(
+        label, xy=(x, y), xytext=(x, ty), fontsize=7.5, ha="center", va="center",
+        color=color, fontweight="bold", zorder=16,
+        arrowprops=dict(arrowstyle="-", color=color, lw=0.8, alpha=0.7),
+    )
 
 def create_pro_chart(
     df, title, fibs=None, entry=None, sl=None, tp=None,
@@ -1302,13 +1411,19 @@ def create_pro_chart(
         ax.plot(plot_df["atr_upper"].values, color="#95a5a6", lw=0.8, ls=":", alpha=0.7, label="ATR+")
         ax.plot(plot_df["atr_lower"].values, color="#95a5a6", lw=0.8, ls=":", alpha=0.7, label="ATR-")
     if "senkou_a" in plot_df.columns:
-        ax.fill_between(range(n), plot_df["senkou_a"].values, plot_df["senkou_b"].values,
-                        where=plot_df["senkou_a"] >= plot_df["senkou_b"], color="#00ff7f", alpha=0.08)
-        ax.fill_between(range(n), plot_df["senkou_a"].values, plot_df["senkou_b"].values,
-                        where=plot_df["senkou_a"] < plot_df["senkou_b"], color="#ff69b4", alpha=0.08)
+        ax.fill_between(
+            range(n), plot_df["senkou_a"].values, plot_df["senkou_b"].values,
+            where=plot_df["senkou_a"] >= plot_df["senkou_b"], color="#00ff7f", alpha=0.08,
+        )
+        ax.fill_between(
+            range(n), plot_df["senkou_a"].values, plot_df["senkou_b"].values,
+            where=plot_df["senkou_a"] < plot_df["senkou_b"], color="#ff69b4", alpha=0.08,
+        )
     if fibs:
-        colors = {"0.0": "#ecf0f1", "0.236": "#e74c3c", "0.382": "#e67e22", "0.5": "#f1c40f",
-                  "0.618": "#2ecc71", "0.786": "#3498db", "1.0": "#9b59b6"}
+        colors = {
+            "0.0": "#ecf0f1", "0.236": "#e74c3c", "0.382": "#e67e22", "0.5": "#f1c40f",
+            "0.618": "#2ecc71", "0.786": "#3498db", "1.0": "#9b59b6",
+        }
         for k, v in fibs.items():
             c = colors.get(k, "#aaaaaa")
             ax.axhline(v, color=c, ls=":", lw=0.75, alpha=0.7)
@@ -1379,14 +1494,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sess = get_market_session()
     await update.message.reply_text(
         "🤖 <b>𓄂 ηοsτrαμεhrδαδ𓆃 | Kronos Stable</b>\n\n"
-        f"🕒 سشن: <b>{esc(sess['name'])}</b> (UTC {sess['utc_hour']:02d})\n\n"
+        f"🕒 سشن فعلی: <b>{esc(sess['name'])}</b> (UTC {sess['utc_hour']:02d})\n"
+        f"{esc(sess['note'])}\n\n"
         "⛔ <b>ورود خودکار هرگز انجام نمی‌شود.</b>\n"
         "سیگنال فقط پس از <b>بسته شدن کندل ۴H</b> معتبر است و با نوتیف اعلام می‌شود.\n"
-        "ثبت معامله فقط با <code>/confirm</code> توسط شما.\n\n"
+        "ثبت معامله فقط با <code>/confirm</code> توسط شما (ژورنال ربات — سفارش XT با خودتان).\n\n"
         "<code>/predict</code> <code>/nds</code> <code>/onchain</code> <code>/market</code>\n"
         "<code>/confirm</code> <code>/position</code> <code>/close</code>\n"
-        "<code>/alert</code> <code>/watch</code> <code>/log</code> <code>/performance</code>\n"
-        "<code>/buy</code> <code>/status</code> <code>/tools</code>",
+        "<code>/alert</code> <code>/watch</code> <code>/watchlist</code>\n"
+        "<code>/log</code> <code>/performance</code>\n"
+        "<code>/buy</code> <code>/status</code> <code>/tools</code> <code>/news</code>",
         parse_mode="HTML",
     )
 
@@ -1415,7 +1532,8 @@ async def tools(update: Update, context: ContextTypes.DEFAULT_TYPE):
         '• <a href="https://www.coinglass.com">Coinglass</a>\n'
         '• <a href="https://charts.explore21.com/bitcoin-realized-price">Explore21</a>\n'
         '• <a href="https://www.arkham.com">Arkham</a>\n'
-        '• <a href="https://www.lookonchain.com">Lookonchain</a>'
+        '• <a href="https://www.lookonchain.com">Lookonchain</a>\n'
+        '• <a href="https://cryptoquant.com">CryptoQuant</a>'
     )
     await update.message.reply_text(text, parse_mode="HTML", disable_web_page_preview=True)
 
@@ -1427,12 +1545,13 @@ async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ دسترسی ندارید.")
         return
     base = (context.args[0].upper() if context.args else "BTC").replace("USDT", "")
-    await update.message.reply_text(
-        f"📰 <b>{esc(base)}</b>\n"
+    text = (
+        f"📰 <b>اخبار | {esc(base)}</b>\n\n"
         '• <a href="https://www.coinglass.com">Coinglass</a>\n'
-        '• <a href="https://www.lookonchain.com">Lookonchain</a>',
-        parse_mode="HTML", disable_web_page_preview=True,
+        '• <a href="https://www.lookonchain.com">Lookonchain</a>\n'
+        '• <a href="https://cryptopanic.com">CryptoPanic</a>'
     )
+    await update.message.reply_text(text, parse_mode="HTML", disable_web_page_preview=True)
 
 async def onchain_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_private(update):
@@ -1565,7 +1684,7 @@ async def watchlist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await status.edit_text("\n".join(lines), parse_mode="HTML")
 
 async def confirm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """تنها مسیر ثبت پوزیشن در ربات — دستی توسط کاربر."""
+    """تنها مسیر ثبت پوزیشن در ربات — دستی توسط کاربر. سفارش صرافی خودکار نیست."""
     if not is_private(update):
         return
     uid = update.effective_user.id
@@ -1588,7 +1707,7 @@ async def confirm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"✅ <b>ثبت دستی توسط شما</b>\n"
         f"<code>{esc(pending['symbol'])}</code> | <b>{esc(pending['direction'])}</b>\n"
         f"ورود <code>{p1(pending['entry'])}</code> | SL <code>{p1(pending['sl'])}</code> | TP <code>{p1(pending['tp'])}</code>\n\n"
-        f"⛔ این ثبت فقط لاگ ربات است؛ سفارش روی XT.com را خودتان می‌زنید.",
+        f"⛔ این فقط لاگ/مانیتور ربات است؛ سفارش روی XT.com را خودتان ثبت می‌کنید.",
         parse_mode="HTML",
     )
 
@@ -1677,7 +1796,8 @@ async def performance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     wins = [p for p in pnls if p > 0]
     winrate = (len(wins) / len(trades) * 100) if trades else 0
     await update.message.reply_text(
-        f"📊 کل <code>{len(trades)}</code> | برد <code>{len(wins)}</code> | وین‌ریت <code>{winrate:.1f}%</code> | PnL <code>{sum(pnls):.2f}</code>",
+        f"📊 کل <code>{len(trades)}</code> | برد <code>{len(wins)}</code> | "
+        f"وین‌ریت <code>{winrate:.1f}%</code> | PnL <code>{sum(pnls):.2f}</code>",
         parse_mode="HTML",
     )
 
@@ -1699,7 +1819,11 @@ async def position_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"ورود <code>{p1(pos['entry'])}</code> | SL <code>{p1(pos['sl'])}</code> | TP <code>{p1(pos['tp'])}</code>\n"
     )
     if price:
-        pnl_pct = ((price - pos["entry"]) / pos["entry"] * 100) if pos["direction"] == "LONG" else ((pos["entry"] - price) / pos["entry"] * 100)
+        pnl_pct = (
+            (price - pos["entry"]) / pos["entry"] * 100
+            if pos["direction"] == "LONG"
+            else (pos["entry"] - price) / pos["entry"] * 100
+        )
         text += f"قیمت <code>{p1(price)}</code> | PnL <code>{pnl_pct:.2f}%</code>\n{format_price_sources(multi)}"
     await update.message.reply_text(text, parse_mode="HTML")
 
@@ -1777,15 +1901,15 @@ async def nds_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         geo = analyze_nds_official(df_1w, df_ltf=df_15m, price=price)
         sess = get_market_session()
         buf = create_nds_weekly_chart(df_1w, f"𓄂 ηοsτrαμεhrδαδ𓆃 | NDS | {symbol} | 1W", geo)
-        caption = (
+        caption = clip_caption(
             f"🧬 <b>NDS | {esc(symbol)} | هفتگی</b>\n"
-            f"🕒 سشن: <b>{esc(sess['name'])}</b>\n"
+            f"🕒 سشن: <b>{esc(sess['name'])}</b> (UTC {sess['utc_hour']:02d})\n"
             f"بایاس: <b>{esc(geo['bias'])}</b> | {esc(geo['cycle'])}\n"
             f"مجاز: {'✅' if geo['trade_allowed'] else '❌'}\n{esc(geo['reason'])}\n"
             f"مقاومت <code>{p1(geo['last_high']) if geo.get('last_high') else '—'}</code> | "
             f"حمایت <code>{p1(geo['last_low']) if geo.get('last_low') else '—'}</code>\n"
             f"۸۶٫۴٪ <code>{p1(geo['level_864']) if geo.get('level_864') else '—'}</code>\n"
-            f"قیمت <code>{p1(price)}</code>\n{format_price_sources(multi)}"
+            f"قیمت <code>{p1(price)}</code>"
         )
         await update.message.reply_photo(photo=buf, caption=caption, parse_mode="HTML")
         multi_nds = analyze_nds_multi(symbol, current_price=price)
@@ -1797,8 +1921,10 @@ async def nds_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             emoji = "🟢" if r["bias"] == "صعودی" else "🔴" if r["bias"] == "نزولی" else "⚪️"
             low_txt = p1(r["tf_low"]) if r.get("tf_low") is not None else "—"
             dist = f"{r['dist_pct']:+.1f}%" if r.get("dist_pct") is not None else "—"
-            lines.append(f"{emoji} {esc(r['label'])}: <b>{esc(r['bias'])}</b> | کف <code>{low_txt}</code> | {dist}")
-        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+            lines.append(
+                f"{emoji} {esc(r['label'])}: <b>{esc(r['bias'])}</b> | کف <code>{low_txt}</code> | {dist}"
+            )
+        await update.message.reply_text("\n".join(lines) + "\n\n" + format_price_sources(multi), parse_mode="HTML")
         await status.delete()
     except Exception as e:
         await status.edit_text(f"❌ {esc(str(e)[:120])}")
@@ -1821,7 +1947,10 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         margin, lev = DEFAULT_MARGIN, DEFAULT_LEVERAGE
     open_pos = get_open_position(uid)
-    status = await update.message.reply_text(f"⏳ تحلیل <code>{esc(symbol)}</code> (کندل ۴H بسته‌شده) ...", parse_mode="HTML")
+    status = await update.message.reply_text(
+        f"⏳ تحلیل <code>{esc(symbol)}</code> (کندل ۴H بسته‌شده) ...",
+        parse_mode="HTML",
+    )
     try:
         session = get_market_session()
         min_score_now = effective_min_score(session)
@@ -1833,7 +1962,6 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await status.edit_text("❌ خطا در داده.")
             return
 
-        # ===== سیگنال فقط روی کندل ۴H بسته‌شده =====
         df_4h = closed_klines(df_4h_full)
         if df_4h is None or len(df_4h) < 80:
             await status.edit_text("❌ داده کندل بسته‌شده ناکافی.")
@@ -1843,14 +1971,17 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         df_15m_c = closed_klines(df_15m) if df_15m is not None else None
 
         multi = get_multi_exchange_prices(symbol)
-        # قیمت لحظه‌ای برای نمایش؛ منطق سیگنال از close آخرین کندل بسته
         live_price = multi["consensus"] or float(df_4h_full["close"].iloc[-1])
         signal_price = float(df_4h["close"].iloc[-1])
         price = live_price
 
         rsi = float(df_4h["rsi"].iloc[-1])
         atr = float(calc_atr(df_4h).iloc[-1])
-        vol_ratio = float(df_4h["volume"].iloc[-1] / df_4h["volume"].tail(20).mean()) if df_4h["volume"].tail(20).mean() > 0 else 1.0
+        vol_ratio = (
+            float(df_4h["volume"].iloc[-1] / df_4h["volume"].tail(20).mean())
+            if df_4h["volume"].tail(20).mean() > 0
+            else 1.0
+        )
         macd_hist = float(df_4h["macd_hist"].iloc[-1]) if "macd_hist" in df_4h.columns else None
         funding_info = get_funding_info(symbol)
         funding = funding_info["rate"]
@@ -1909,10 +2040,10 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 entry = float(lock["entry"])
                 sl = float(lock["sl"])
                 tp = float(lock["tp"])
-                reasons.insert(0, f"قفل تا {lock['expiry'][:16]} UTC")
+                reasons.insert(0, f"قفل سیگنال تا {lock['expiry'][:16]} UTC")
             else:
                 clear_signal_lock(uid, symbol)
-                risks.append("قفل قبلی با SL ابطال شد")
+                risks.append("قفل قبلی با رسیدن به SL ابطال شد")
 
         if not locked:
             allow = (
@@ -1922,18 +2053,18 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             if session["quality"] == "low" and score < min_score_now + 2:
                 allow = False
-                risks.append("سشن کم‌نقدینگی — آستانه بالاتر")
+                risks.append("سشن کم‌نقدینگی — آستانه بالاتر اعمال شد")
 
             if allow and higher == "صعودی" and tf_align.get("align_long_ok"):
                 if is_alt and btc_bias and btc_bias.get("bias") == "نزولی" and score < ALT_BTC_BLOCK_SCORE:
-                    risks.append(f"لانگ آلت بلاک (BTC نزولی)")
+                    risks.append(f"لانگ آلت بلاک (BTC نزولی، امتیاز < {ALT_BTC_BLOCK_SCORE})")
                 elif regime_info.get("regime") == "رنج" and vol_ratio < 1.15:
-                    risks.append("رنج + حجم ضعیف")
+                    risks.append("رنج + حجم ضعیف — بدون ورود")
                 else:
                     direction, signal, is_strong = "LONG", "🟢 LONG", True
             elif allow and higher == "نزولی" and tf_align.get("align_short_ok"):
                 if regime_info.get("regime") == "رنج" and vol_ratio < 1.15:
-                    risks.append("رنج + حجم ضعیف")
+                    risks.append("رنج + حجم ضعیف — بدون ورود")
                 else:
                     direction, signal, is_strong = "SHORT", "🔴 SHORT", True
             else:
@@ -1943,7 +2074,6 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     risks.append(f"امتیاز {score} < آستانه سشن ({min_score_now})")
 
             if direction:
-                # ورود پیشنهادی نزدیک قیمت لحظه، SL/TP از ساختار کندل بسته
                 entry = round(price, 1)
                 sl, tp = calculate_dollar_sl_tp(
                     entry, direction, atr, margin, lev, RISK_PER_TRADE,
@@ -1955,7 +2085,9 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     geo.get("reason") or "", session["name"], candle_close_ts,
                 )
             else:
-                entry, sl, tp = round(price, 1), round(price - atr * 1.6, 1), round(price + atr * 1.6, 1)
+                entry = round(price, 1)
+                sl = round(price - atr * 1.6, 1)
+                tp = round(price + atr * 1.6, 1)
 
         position_size = margin * lev
         risk_usd = abs(entry - sl) / entry * position_size if entry else 0
@@ -1964,9 +2096,9 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         fibs = calc_fib(df_4h)
         obs = detect_order_blocks(df_4h)
 
-        # نمودار از دادهٔ بسته‌شده + قیمت زنده در عنوان
         buf = create_pro_chart(
-            df_4h, f"𓄂 ηοsτrαμεhrδαδ𓆃 | {symbol} | 4H closed | {higher}",
+            df_4h,
+            f"𓄂 ηοsτrαμεhrδαδ𓆃 | {symbol} | 4H closed | {higher}",
             fibs=fibs, entry=entry, sl=sl, tp=tp, sims=sims, mean_path=mean_path,
             level_864=geo.get("level_864"), show_nds_hooks=False, max_bars=100,
         )
@@ -1984,81 +2116,78 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         q_emoji = "🟢" if session["quality"] == "high" else "🟡" if session["quality"] == "medium" else "🔴"
 
-        plan = (
-            f"📋 <b>پلن | {esc(symbol)}</b>\n"
-            f"🕒 <code>{now_utc}</code>\n"
-            f"{q_emoji} سشن: <b>{esc(session['name'])}</b> | {esc(session['quality'])}\n"
-            f"🕯 مبنای سیگنال: <b>کندل ۴H بسته‌شده</b> | close <code>{p1(signal_price)}</code>\n"
-            f"قیمت لحظه: <code>{p1(price)}</code>\n\n"
-            f"سیگنال: <b>{signal}</b>\n"
-            f"امتیاز: <code>{score}/100</code> | آستانه: <code>{min_score_now}</code>\n"
-            f"ورود پیشنهادی: <code>{p1(entry)}</code> | SL: <code>{p1(sl)}</code> | TP: <code>{p1(tp)}</code>\n"
-            f"💵 ریسک <code>${risk_usd:.2f}</code> | سود <code>${reward_usd:.2f}</code> | R:R <code>1:{rr:.2f}</code>\n\n"
-            f"<b>NDS</b>\n• بایاس <b>{esc(higher)}</b> | {esc(geo.get('cycle'))}\n"
-            f"• مجوز {'✅' if geo.get('trade_allowed') else '❌'} | {esc(geo.get('reason'))}\n"
+        # ----- کپشن کوتاه (زیر حد تلگرام) -----
+        caption = clip_caption(
+            f"📋 <b>{esc(symbol)}</b> | <code>{now_utc}</code>\n"
+            f"{q_emoji} {esc(session['name'])} | ۴H بسته close <code>{p1(signal_price)}</code>\n"
+            f"سیگنال: <b>{signal}</b> | امتیاز <code>{score}</code> / آستانه <code>{min_score_now}</code>\n"
+            f"ورود <code>{p1(entry)}</code> | SL <code>{p1(sl)}</code> | TP <code>{p1(tp)}</code>\n"
+            f"R:R 1:{rr:.1f} | NDS <b>{esc(higher)}</b> | {esc(geo.get('cycle'))}\n"
+            f"⛔ ورود خودکار نیست"
         )
-        if geo.get("last_high"):
-            plan += f"• مقاومت <code>{p1(geo['last_high'])}</code>\n"
-        if geo.get("last_low"):
-            plan += f"• حمایت <code>{p1(geo['last_low'])}</code>\n"
+        await update.message.reply_photo(photo=buf, caption=caption, parse_mode="HTML")
 
-        plan += "\n" + format_levels_block(signal_price, df_4h, fibs, geo)
+        # ----- جزئیات کامل در پیام‌های متنی -----
+        detail1 = (
+            f"<b>NDS</b>\n"
+            f"• مجوز {'✅' if geo.get('trade_allowed') else '❌'} | {esc(geo.get('reason'))}\n"
+            f"• مقاومت <code>{p1(geo.get('last_high'))}</code> | حمایت <code>{p1(geo.get('last_low'))}</code>\n"
+            f"• قیمت لحظه <code>{p1(price)}</code> | close بسته <code>{p1(signal_price)}</code>\n\n"
+            + format_levels_block(signal_price, df_4h, fibs, geo)
+        )
+        await update.message.reply_text(detail1, parse_mode="HTML")
 
-        plan += (
-            f"\n\n<b>فیلتر کیفیت</b>\n"
-            f"• رژیم: <b>{esc(regime_info.get('regime'))}</b> | ATR <code>{regime_info.get('atr_pct')}%</code> | Vol <code>{regime_info.get('vol_ratio')}x</code>\n"
-            f"• TF: صعودی <code>{tf_align['bull']}</code> | نزولی <code>{tf_align['bear']}</code> | بالاتر <b>{esc(tf_align['higher_bias'])}</b>\n"
+        detail2 = (
+            f"<b>فیلتر کیفیت</b>\n"
+            f"• رژیم: <b>{esc(regime_info.get('regime'))}</b> | "
+            f"ATR <code>{regime_info.get('atr_pct')}%</code> | Vol <code>{regime_info.get('vol_ratio')}x</code>\n"
+            f"• هم‌راستایی TF: صعودی <code>{tf_align['bull']}</code> | "
+            f"نزولی <code>{tf_align['bear']}</code> | بالاتر <b>{esc(tf_align['higher_bias'])}</b>\n"
+            f"• سشن: {esc(session['name'])} | {esc(session['note'])}\n"
         )
         if is_alt and btc_bias:
-            plan += f"• BTC: <b>{esc(btc_bias.get('bias'))}</b>\n"
+            detail2 += f"• BTC ساختاری: <b>{esc(btc_bias.get('bias'))}</b> ({esc(btc_bias.get('detail', ''))})\n"
         if locked:
-            plan += "• 🔒 قفل ۳ ساعته\n"
-
+            detail2 += "• 🔒 سیگنال قفل ۳ ساعته فعال است\n"
+        detail2 += f"\n💰 فاندینگ: {fund_line}\n📡 {format_price_sources(multi)}"
         if onchain and onchain.get("ok"):
-            plan += "\n<b>آن‌چین</b>\n"
-            if onchain.get("sth_realized_price"):
-                plan += f"• STH RP <code>{p1(onchain['sth_realized_price'])}</code>"
-                if onchain.get("sth_mvrv") is not None:
-                    plan += f" | MVRV <code>{onchain['sth_mvrv']}</code>"
-                plan += "\n"
-            if onchain.get("lth_realized_price"):
-                plan += f"• LTH RP <code>{p1(onchain['lth_realized_price'])}</code>"
-                if onchain.get("lth_mvrv") is not None:
-                    plan += f" | MVRV <code>{onchain['lth_mvrv']}</code>"
-                plan += "\n"
-
+            detail2 += "\n\n" + format_onchain_html(onchain)
         if obs:
-            plan += "\n<b>اوردر بلاک</b>\n"
+            detail2 += "\n\n<b>اوردر بلاک</b>\n"
             for ob in obs:
                 tag = "صعودی" if ob["type"] == "bullish_ob" else "نزولی"
-                plan += f"• OB {tag}: <code>{p1(ob['low'])}</code>–<code>{p1(ob['high'])}</code>\n"
-        plan += f"\n💰 فاندینگ: {fund_line}\n📡 {format_price_sources(multi)}"
+                detail2 += f"• OB {tag}: <code>{p1(ob['low'])}</code>–<code>{p1(ob['high'])}</code>\n"
         if open_pos:
-            plan += f"\n\n📌 پوزیشن ثبت‌شده: <code>{esc(open_pos['symbol'])}</code>"
-        plan += "\n\n⛔ ورود خودکار نیست — فقط نوتیف + <code>/confirm</code> اختیاری."
+            detail2 += f"\n📌 پوزیشن ثبت‌شده: <code>{esc(open_pos['symbol'])}</code>"
+        await update.message.reply_text(detail2, parse_mode="HTML")
 
-        await update.message.reply_photo(photo=buf, caption=plan, parse_mode="HTML")
-
-        reason_text = "📌 <b>دلیل:</b>\n" + ("\n".join([f"• {esc(r)}" for r in reasons]) if reasons else "• —")
-        reason_text += "\n\n⚠️ <b>ریسک:</b>\n" + ("\n".join([f"• {esc(r)}" for r in risks]) if risks else "• —")
+        reason_text = "📌 <b>دلیل:</b>\n" + (
+            "\n".join([f"• {esc(r)}" for r in reasons]) if reasons else "• —"
+        )
+        reason_text += "\n\n⚠️ <b>ریسک:</b>\n" + (
+            "\n".join([f"• {esc(r)}" for r in risks]) if risks else "• —"
+        )
         await update.message.reply_text(reason_text, parse_mode="HTML")
 
         if is_strong and direction and not open_pos:
             pend = {
-                "symbol": symbol, "direction": direction,
-                "entry": entry, "sl": sl, "tp": tp,
+                "symbol": symbol,
+                "direction": direction,
+                "entry": entry,
+                "sl": sl,
+                "tp": tp,
                 "candle_close_ts": candle_close_ts,
             }
             set_pending_signal(uid, pend)
-            # نوتیف فوری + جلوگیری از تکرار همان کندل
             if candle_close_ts and not was_notified(uid, symbol, candle_close_ts):
                 mark_notified(uid, symbol, candle_close_ts)
             await update.message.reply_text(
                 f"🔔 <b>نوتیف: سیگنال پس از بسته شدن ۴H</b>\n"
                 f"{esc(direction)} | <code>{esc(symbol)}</code>\n"
-                f"پیشنهاد ورود <code>{p1(entry)}</code> | SL <code>{p1(sl)}</code> | TP <code>{p1(tp)}</code>\n\n"
+                f"پیشنهاد ورود <code>{p1(entry)}</code> | "
+                f"SL <code>{p1(sl)}</code> | TP <code>{p1(tp)}</code>\n\n"
                 f"⛔ ربات <b>سفارشی روی صرافی ثبت نمی‌کند</b>.\n"
-                f"اگر خودت می‌خواهی در ژورنال ربات ثبت شود: <code>/confirm</code>\n\n"
+                f"اگر فقط می‌خواهی در ژورنال ربات ثبت شود: <code>/confirm</code>\n\n"
                 + DISCLAIMER,
                 parse_mode="HTML",
             )
@@ -2066,7 +2195,7 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("ℹ️ پوزیشن باز — فقط تحلیل.")
         else:
             await update.message.reply_text(
-                "⏸ ورود پیشنهادی نیست (NDS / TF / سشن / رژیم).\n" + DISCLAIMER,
+                "⏸ ورود پیشنهادی نیست (NDS / هم‌راستایی / سشن / رژیم).\n" + DISCLAIMER,
                 parse_mode="HTML",
             )
 
@@ -2085,17 +2214,18 @@ def main():
     t_monitor = threading.Thread(target=monitor_positions, args=(bot_for_monitor,), daemon=True)
     t_monitor.start()
 
-    for cmd, handler in [
+    handlers = [
         ("start", start), ("buy", buy), ("status", status_cmd), ("tools", tools), ("news", news_command),
         ("onchain", onchain_command), ("predict", predict_command), ("nds", nds_command), ("market", market_command),
         ("alert", alert_cmd), ("alerts", alerts_cmd), ("removealert", removealert_cmd),
         ("log", log_trade), ("performance", performance), ("position", position_cmd), ("close", close_cmd),
         ("confirm", confirm_cmd), ("watch", watch_cmd), ("unwatch", unwatch_cmd), ("watchlist", watchlist_cmd),
         ("adduser", adduser), ("removeuser", removeuser), ("listusers", listusers),
-    ]:
+    ]
+    for cmd, handler in handlers:
         application.add_handler(CommandHandler(cmd, handler))
 
-    print("𓄂 ηοsτrαμεhrδαδ𓆃 | NO auto-entry | 4H closed candle only")
+    print("𓄂 ηοsτrαμεhrδαδ𓆃 | Full Stable | caption-split | no auto-entry | 4H closed")
     application.run_polling()
 
 if __name__ == "__main__":
