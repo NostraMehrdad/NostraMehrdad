@@ -1,5 +1,5 @@
-# 𓄂 ηοsτrαμεhrδαδ𓆃 | Kronos Stable — کامل
-# ورود خودکار نیست | سیگنال روی کندل ۴H بسته‌شده | کپشن کوتاه + جزئیات جدا
+# 𓄂 ηοsτrαμεhrδαδ𓆃 | Kronos Stable
+# ورود خودکار نیست | سیگنال روی کندل ۴H بسته‌شده | نوتیف اجباری | کپشن کوتاه
 import os
 import json
 import threading
@@ -33,7 +33,7 @@ app_web = Flask(__name__)
 
 @app_web.route("/")
 def home():
-    return "𓄂 ηοsτrαμεhrδαδ𓆃 | Kronos Stable is active | NO auto-entry"
+    return "𓄂 ηοsτrαμεhrδαδ𓆃 | Kronos Stable | NO auto-entry | Notify on 4H close"
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -62,7 +62,7 @@ DEFAULT_MARGIN = 5.0
 DEFAULT_LEVERAGE = 8
 RISK_PER_TRADE = 0.5
 RATE_LIMIT_SECONDS = 45
-MONITOR_INTERVAL = 120
+MONITOR_INTERVAL = 90
 DANGER_PERCENT = 0.35
 PULLBACK_ALERT_PCT = 0.012
 MIN_SIGNAL_SCORE = 70
@@ -73,6 +73,7 @@ MIN_TF_ALIGN = 3
 ALT_BTC_BLOCK_SCORE = 80
 SIGNAL_LOCK_HOURS = 3
 CAPTION_MAX = 1000
+MIN_RR = 1.5
 
 NDS_INTERVALS = [
     ("15m", "۱۵ دقیقه"),
@@ -152,6 +153,19 @@ def clip_caption(text, limit=CAPTION_MAX):
         return text
     return text[: limit - 12] + "\n…"
 
+def unique_lines(items, max_n=12):
+    seen = set()
+    out = []
+    for x in items or []:
+        s = str(x).strip()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+        if len(out) >= max_n:
+            break
+    return out
+
 # -------------------- سشن بازار (UTC) --------------------
 
 def get_market_session(now=None):
@@ -160,7 +174,6 @@ def get_market_session(now=None):
     if 13 <= h < 16:
         return {
             "name": "هم‌پوشانی اروپا–آمریکا",
-            "name_en": "London-NY Overlap",
             "quality": "high",
             "score_boost": 3,
             "min_score_extra": 0,
@@ -170,7 +183,6 @@ def get_market_session(now=None):
     if 16 <= h < 21:
         return {
             "name": "آمریکا",
-            "name_en": "US Session",
             "quality": "high",
             "score_boost": 2,
             "min_score_extra": 0,
@@ -180,7 +192,6 @@ def get_market_session(now=None):
     if 7 <= h < 13:
         return {
             "name": "اروپا",
-            "name_en": "Europe Session",
             "quality": "medium",
             "score_boost": 1,
             "min_score_extra": 2,
@@ -190,20 +201,18 @@ def get_market_session(now=None):
     if 0 <= h < 7:
         return {
             "name": "آسیا",
-            "name_en": "Asia Session",
             "quality": "medium",
             "score_boost": 0,
             "min_score_extra": 4,
-            "note": "اغلب رنج یا حرکت‌های ناپایدار؛ فقط سیگنال خیلی قوی.",
+            "note": "اغلب رنج یا حرکت ناپایدار؛ فقط سیگنال خیلی قوی.",
             "utc_hour": h,
         }
     return {
         "name": "پس از آمریکا / کم‌نقدینگی",
-        "name_en": "Post-US Thin",
         "quality": "low",
         "score_boost": -4,
         "min_score_extra": 8,
-        "note": "پس از بسته شدن تقریبی آمریکا تا باز شدن آسیا: لغزش و فیک‌بریک بیشتر. ورود فقط با امتیاز خیلی بالا.",
+        "note": "پس از آمریکا تا آسیا: لغزش و فیک‌بریک بیشتر. فقط امتیاز خیلی بالا.",
         "utc_hour": h,
     }
 
@@ -471,8 +480,11 @@ def _load_onchain_cache():
     if not data or "ts" not in data:
         return None
     try:
-        if (time.time() - float(data["ts"])) / 3600.0 <= ONCHAIN_CACHE_HOURS:
-            return data.get("payload")
+        age_h = (time.time() - float(data["ts"])) / 3600.0
+        if age_h <= ONCHAIN_CACHE_HOURS:
+            payload = data.get("payload") or {}
+            payload["_cache_age_hours"] = round(age_h, 1)
+            return payload
     except Exception:
         pass
     return None
@@ -580,6 +592,7 @@ def get_btc_onchain_realized(live_price=None):
             "chart": base.get("chart") or "https://charts.explore21.com/bitcoin-realized-price",
         },
         "block": base.get("block"),
+        "_cache_age_hours": 0.0,
     }
     if payload["ok"]:
         _save_onchain_cache(payload)
@@ -590,7 +603,10 @@ def format_onchain_html(oc):
         return "⛓ <b>آن‌چین BTC</b>\nداده در دسترس نیست."
     lines = ["⛓ <b>آن‌چین BTC | Realized Price</b>"]
     if oc.get("date"):
-        lines.append(f"تاریخ: <code>{esc(oc['date'])}</code>")
+        lines.append(f"تاریخ داده: <code>{esc(oc['date'])}</code>")
+    age = oc.get("_cache_age_hours")
+    if age is not None:
+        lines.append(f"سن کش: <code>{age}</code> ساعت")
     if oc.get("price"):
         lines.append(f"قیمت: <code>{p1(oc['price'])}</code>")
     if oc.get("sth_realized_price"):
@@ -613,7 +629,7 @@ def format_onchain_html(oc):
         lines.append(f'\n<a href="{chart}">Explore21</a>')
     return "\n".join(lines)
 
-# -------------------- مانیتور --------------------
+# -------------------- مانیتور + نوتیف اجباری --------------------
 
 def monitor_positions(bot: Bot):
     while True:
@@ -701,7 +717,7 @@ def monitor_positions(bot: Bot):
                     print("Monitor pos:", e)
             save_json(ALERT_STATE_FILE, alerts)
 
-            # نوتیف سیگنال معلق — ورود خودکار نیست
+            # نوتیف اجباری سیگنال معلق (حتی اگر تلگرام بسته باشد)
             pendings = load_json(PENDING_FILE)
             for uid_str, pend in list(pendings.items()):
                 try:
@@ -718,18 +734,19 @@ def monitor_positions(bot: Bot):
                         bot.send_message(
                             chat_id=uid,
                             text=(
-                                f"🔔 <b>نوتیف سیگنال پس از بسته شدن کندل ۴H</b>\n"
+                                f"🔔 <b>نوتیف فوری — سیگنال پس از بسته شدن کندل ۴H</b>\n\n"
                                 f"<code>{esc(pend['symbol'])}</code> | <b>{esc(pend['direction'])}</b>\n"
-                                f"ورود پیشنهادی <code>{p1(pend['entry'])}</code> | "
+                                f"ورود پیشنهادی <code>{p1(pend['entry'])}</code>\n"
                                 f"SL <code>{p1(pend['sl'])}</code> | TP <code>{p1(pend['tp'])}</code>\n\n"
-                                f"⛔ ورود خودکار انجام <b>نمی‌شود</b>.\n"
-                                f"اگر موافقی فقط برای ثبت ژورنال ربات: <code>/confirm</code>\n"
-                                f"سفارش روی XT.com را خودتان می‌زنید."
+                                f"⏱ فرصت واکنش داری — سفارش را خودت روی XT.com بزن.\n"
+                                f"⛔ ربات ورود خودکار نمی‌کند.\n"
+                                f"اگر فقط می‌خواهی در ژورنال ربات ثبت شود: <code>/confirm</code>\n\n"
+                                f"{DISCLAIMER}"
                             ),
                             parse_mode="HTML",
                         )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        print("Notify send:", e)
                 except Exception as e:
                     print("Pending notify:", e)
 
@@ -787,7 +804,6 @@ def fetch_klines(symbol, interval, limit=300):
     return None
 
 def closed_klines(df):
-    """آخرین کندل معمولاً هنوز باز است — برای سیگنال حذف می‌شود."""
     if df is None or len(df) < 3:
         return df
     return df.iloc[:-1].copy()
@@ -1321,11 +1337,11 @@ def calculate_signal_score(
             risks.append("MACD خلاف بایاس")
 
     reasons.append("مبنای سیگنال: کندل ۴H بسته‌شده")
-    return max(0, min(100, round(score, 1))), reasons, risks, higher_bias
+    return max(0, min(100, round(score, 1))), unique_lines(reasons), unique_lines(risks), higher_bias
 
 def calculate_dollar_sl_tp(
     entry, direction, atr, margin=5.0, leverage=8, risk_dollar=0.5,
-    structure_low=None, structure_high=None, sl_hint=None, tp_hint=None,
+    structure_low=None, structure_high=None, sl_hint=None, tp_hint=None, min_rr=MIN_RR,
 ):
     position_size = margin * leverage
     price_risk = (risk_dollar / position_size) * entry
@@ -1337,22 +1353,20 @@ def calculate_dollar_sl_tp(
             sl = min(sl, sl_hint)
         elif structure_low and structure_low < entry:
             sl = min(sl, structure_low - atr * 0.1)
-        tp = entry + final_distance * 2.0
+        risk_dist = entry - sl
+        tp = entry + risk_dist * min_rr
         if tp_hint and tp_hint > entry:
             tp = max(tp, tp_hint)
-        elif structure_high and structure_high > entry:
-            tp = min(tp, structure_high - atr * 0.1) if structure_high - entry > final_distance else tp
     else:
         sl = entry + final_distance
         if sl_hint and sl_hint > entry:
             sl = max(sl, sl_hint)
         elif structure_high and structure_high > entry:
             sl = max(sl, structure_high + atr * 0.1)
-        tp = entry - final_distance * 2.0
+        risk_dist = sl - entry
+        tp = entry - risk_dist * min_rr
         if tp_hint and tp_hint < entry:
             tp = min(tp, tp_hint)
-        elif structure_low and structure_low < entry:
-            tp = max(tp, structure_low + atr * 0.1) if entry - structure_low > final_distance else tp
     return round(sl, 1), round(tp, 1)
 
 # -------------------- نمودار --------------------
@@ -1497,8 +1511,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🕒 سشن فعلی: <b>{esc(sess['name'])}</b> (UTC {sess['utc_hour']:02d})\n"
         f"{esc(sess['note'])}\n\n"
         "⛔ <b>ورود خودکار هرگز انجام نمی‌شود.</b>\n"
-        "سیگنال فقط پس از <b>بسته شدن کندل ۴H</b> معتبر است و با نوتیف اعلام می‌شود.\n"
-        "ثبت معامله فقط با <code>/confirm</code> توسط شما (ژورنال ربات — سفارش XT با خودتان).\n\n"
+        "سیگنال فقط پس از <b>بسته شدن کندل ۴H</b> معتبر است.\n"
+        "🔔 در صورت سیگنال معتبر، <b>نوتیف فوری</b> می‌گیری (حتی اگر تلگرام بسته باشد).\n"
+        "ثبت ژورنال فقط با <code>/confirm</code> توسط شما.\n\n"
         "<code>/predict</code> <code>/nds</code> <code>/onchain</code> <code>/market</code>\n"
         "<code>/confirm</code> <code>/position</code> <code>/close</code>\n"
         "<code>/alert</code> <code>/watch</code> <code>/watchlist</code>\n"
@@ -1684,7 +1699,6 @@ async def watchlist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await status.edit_text("\n".join(lines), parse_mode="HTML")
 
 async def confirm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """تنها مسیر ثبت پوزیشن در ربات — دستی توسط کاربر. سفارش صرافی خودکار نیست."""
     if not is_private(update):
         return
     uid = update.effective_user.id
@@ -2024,6 +2038,7 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         signal = "⚪️ صبر"
         is_strong = False
         locked = False
+        entry = sl = tp = None
         lock = get_signal_lock(uid, symbol)
 
         if lock and lock.get("direction") in ("LONG", "SHORT"):
@@ -2078,28 +2093,33 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 sl, tp = calculate_dollar_sl_tp(
                     entry, direction, atr, margin, lev, RISK_PER_TRADE,
                     structure_low=geo.get("last_low"), structure_high=geo.get("last_high"),
-                    sl_hint=geo.get("sl_hint"), tp_hint=geo.get("tp_hint"),
+                    sl_hint=geo.get("sl_hint"), tp_hint=geo.get("tp_hint"), min_rr=MIN_RR,
                 )
                 set_signal_lock(
                     uid, symbol, direction, entry, sl, tp, score,
                     geo.get("reason") or "", session["name"], candle_close_ts,
                 )
             else:
+                # فرضی — فقط برای نمایش در جزئیات، نه به‌عنوان سیگنال
                 entry = round(price, 1)
                 sl = round(price - atr * 1.6, 1)
-                tp = round(price + atr * 1.6, 1)
+                tp = round(price + atr * 1.6 * MIN_RR, 1)
 
-        position_size = margin * lev
-        risk_usd = abs(entry - sl) / entry * position_size if entry else 0
-        reward_usd = abs(tp - entry) / entry * position_size if entry else 0
+        risk_usd = abs(entry - sl) / entry * (margin * lev) if entry and sl else 0
+        reward_usd = abs(tp - entry) / entry * (margin * lev) if entry and tp else 0
         rr = reward_usd / risk_usd if risk_usd > 0 else 0
         fibs = calc_fib(df_4h)
         obs = detect_order_blocks(df_4h)
 
+        chart_entry = entry if is_strong else None
+        chart_sl = sl if is_strong else None
+        chart_tp = tp if is_strong else None
+
         buf = create_pro_chart(
             df_4h,
             f"𓄂 ηοsτrαμεhrδαδ𓆃 | {symbol} | 4H closed | {higher}",
-            fibs=fibs, entry=entry, sl=sl, tp=tp, sims=sims, mean_path=mean_path,
+            fibs=fibs, entry=chart_entry, sl=chart_sl, tp=chart_tp,
+            sims=sims, mean_path=mean_path,
             level_864=geo.get("level_864"), show_nds_hooks=False, max_bars=100,
         )
 
@@ -2116,18 +2136,36 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         q_emoji = "🟢" if session["quality"] == "high" else "🟡" if session["quality"] == "medium" else "🔴"
 
-        # ----- کپشن کوتاه (زیر حد تلگرام) -----
-        caption = clip_caption(
-            f"📋 <b>{esc(symbol)}</b> | <code>{now_utc}</code>\n"
-            f"{q_emoji} {esc(session['name'])} | ۴H بسته close <code>{p1(signal_price)}</code>\n"
-            f"سیگنال: <b>{signal}</b> | امتیاز <code>{score}</code> / آستانه <code>{min_score_now}</code>\n"
-            f"ورود <code>{p1(entry)}</code> | SL <code>{p1(sl)}</code> | TP <code>{p1(tp)}</code>\n"
-            f"R:R 1:{rr:.1f} | NDS <b>{esc(higher)}</b> | {esc(geo.get('cycle'))}\n"
-            f"⛔ ورود خودکار نیست"
-        )
+        # توضیح واضح NDS در کپشن
+        nds_note = ""
+        if geo.get("bias") == "صعودی" and not geo.get("trade_allowed"):
+            nds_note = "ساختار محلی صعودی ولی تریگر ۱۲۳/۸۶٫۴٪ ناقص"
+        elif geo.get("bias") == "نزولی" and not geo.get("trade_allowed"):
+            nds_note = "ساختار محلی نزولی ولی تریگر ۱۲۳/۸۶٫۴٪ ناقص"
+        elif geo.get("trade_allowed"):
+            nds_note = geo.get("reason") or "تریگر کامل"
+
+        if is_strong and direction:
+            caption = clip_caption(
+                f"📋 <b>{esc(symbol)}</b> | <code>{now_utc}</code>\n"
+                f"{q_emoji} {esc(session['name'])} | ۴H بسته close <code>{p1(signal_price)}</code>\n"
+                f"سیگنال: <b>{signal}</b> | امتیاز <code>{score}</code> / آستانه <code>{min_score_now}</code>\n"
+                f"ورود <code>{p1(entry)}</code> | SL <code>{p1(sl)}</code> | TP <code>{p1(tp)}</code>\n"
+                f"R:R 1:{rr:.1f} | NDS <b>{esc(higher)}</b> | {esc(geo.get('cycle'))}\n"
+                f"🔔 نوتیف فعال — ⛔ ورود خودکار نیست"
+            )
+        else:
+            caption = clip_caption(
+                f"📋 <b>{esc(symbol)}</b> | <code>{now_utc}</code>\n"
+                f"{q_emoji} {esc(session['name'])} | ۴H بسته close <code>{p1(signal_price)}</code>\n"
+                f"سیگنال: <b>{signal}</b> | امتیاز <code>{score}</code> / آستانه <code>{min_score_now}</code>\n"
+                f"NDS محلی: <b>{esc(geo.get('bias'))}</b> | بالاتر: <b>{esc(higher)}</b>\n"
+                f"{esc(nds_note)}\n"
+                f"⛔ ورود مجاز نیست | ورود خودکار نیست"
+            )
+
         await update.message.reply_photo(photo=buf, caption=caption, parse_mode="HTML")
 
-        # ----- جزئیات کامل در پیام‌های متنی -----
         detail1 = (
             f"<b>NDS</b>\n"
             f"• مجوز {'✅' if geo.get('trade_allowed') else '❌'} | {esc(geo.get('reason'))}\n"
@@ -2135,6 +2173,12 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• قیمت لحظه <code>{p1(price)}</code> | close بسته <code>{p1(signal_price)}</code>\n\n"
             + format_levels_block(signal_price, df_4h, fibs, geo)
         )
+        if not is_strong:
+            detail1 += (
+                f"\n\n📌 <b>سطوح فرضی (ورود مجاز نیست)</b>\n"
+                f"• فرضی Entry <code>{p1(entry)}</code> | SL <code>{p1(sl)}</code> | TP <code>{p1(tp)}</code>\n"
+                f"• این اعداد فقط برای مرجع هستند — سیگنال فعال نیست."
+            )
         await update.message.reply_text(detail1, parse_mode="HTML")
 
         detail2 = (
@@ -2179,14 +2223,16 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "candle_close_ts": candle_close_ts,
             }
             set_pending_signal(uid, pend)
+            # نوتیف فوری همین الان + مانیتور هم دوباره می‌فرستد اگر لازم باشد
             if candle_close_ts and not was_notified(uid, symbol, candle_close_ts):
                 mark_notified(uid, symbol, candle_close_ts)
             await update.message.reply_text(
-                f"🔔 <b>نوتیف: سیگنال پس از بسته شدن ۴H</b>\n"
+                f"🔔 <b>نوتیف: سیگنال پس از بسته شدن ۴H</b>\n\n"
                 f"{esc(direction)} | <code>{esc(symbol)}</code>\n"
-                f"پیشنهاد ورود <code>{p1(entry)}</code> | "
-                f"SL <code>{p1(sl)}</code> | TP <code>{p1(tp)}</code>\n\n"
-                f"⛔ ربات <b>سفارشی روی صرافی ثبت نمی‌کند</b>.\n"
+                f"ورود پیشنهادی <code>{p1(entry)}</code>\n"
+                f"SL <code>{p1(sl)}</code> | TP <code>{p1(tp)}</code> | R:R 1:{rr:.1f}\n\n"
+                f"⏱ فرصت واکنش داری — سفارش را خودت روی XT.com بزن.\n"
+                f"⛔ ربات <b>سفارشی ثبت نمی‌کند</b>.\n"
                 f"اگر فقط می‌خواهی در ژورنال ربات ثبت شود: <code>/confirm</code>\n\n"
                 + DISCLAIMER,
                 parse_mode="HTML",
@@ -2225,7 +2271,7 @@ def main():
     for cmd, handler in handlers:
         application.add_handler(CommandHandler(cmd, handler))
 
-    print("𓄂 ηοsτrαμεhrδαδ𓆃 | Full Stable | caption-split | no auto-entry | 4H closed")
+    print("𓄂 ηοsτrαμεhrδαδ𓆃 | Stable | WAIT بدون Entry واقعی | نوتیف ۴H | R:R≥1.5 | no auto-entry")
     application.run_polling()
 
 if __name__ == "__main__":
