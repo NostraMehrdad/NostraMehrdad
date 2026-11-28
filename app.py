@@ -1,5 +1,6 @@
 # 𓄂 ηοsτrαμεhrδαδ𓆃 | Kronos Stable
-# Pre-Alert + Pullback Entry Zone | NO auto-entry | 4H closed | Notify
+# Pre-Alert + Pullback + Entry Chart | NO auto-entry | 4H closed | Notify
+# Defaults: BTCUSDT / QNTUSDT | Price up to 4 decimals
 import os
 import json
 import threading
@@ -20,8 +21,10 @@ from matplotlib.patches import Rectangle
 from matplotlib.gridspec import GridSpec
 
 from flask import Flask
-from telegram import Update, Bot
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
+)
 
 try:
     import ccxt
@@ -33,7 +36,7 @@ app_web = Flask(__name__)
 
 @app_web.route("/")
 def home():
-    return "𓄂 ηοsτrαμεhrδαδ𓆃 | Kronos Stable | Pre-Alert + Pullback | NO auto-entry"
+    return "𓄂 ηοsτrαμεhrδαδ𓆃 | Kronos Stable | Entry Chart + Pre-Alert + Pullback | NO auto-entry"
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -46,6 +49,9 @@ COINGLASS_API_KEY = os.environ.get("COINGLASS_API_KEY", "").strip()
 USDT_WALLET = "TTrC39T9eHNwpGmUu5FKzMWyEHELAmFV5S"
 SUBSCRIPTION_PRICE = 10
 SUBSCRIPTION_DAYS = 30
+
+# جفت‌های پیش‌فرض
+DEFAULT_SYMBOLS = ["BTCUSDT", "QNTUSDT"]
 
 USERS_FILE = "users.json"
 JOURNAL_FILE = "journal.json"
@@ -97,11 +103,29 @@ DISCLAIMER = (
 def esc(x):
     return html.escape(str(x) if x is not None else "")
 
-def p1(x):
+def pfmt(x):
+    """
+    نمایش قیمت:
+    - اگر قیمت کمتر از ۱ واحد باشد → تا ۴ رقم اعشار
+    - قیمت‌های بزرگ‌تر با اعشار کمتر برای خوانایی
+    """
     try:
-        return f"{float(x):.1f}"
+        v = float(x)
+        av = abs(v)
+        if av < 1:
+            return f"{v:.4f}"   # هر ارزی زیر ۱ واحد → ۴ رقم اعشار
+        if av < 10:
+            return f"{v:.4f}"   # مثل بسیاری آلت‌ها / QNT
+        if av < 100:
+            return f"{v:.3f}"
+        if av < 1000:
+            return f"{v:.2f}"
+        return f"{v:.1f}"       # BTC و مشابه
     except Exception:
         return str(x)
+
+# سازگاری با نام قدیمی
+p1 = pfmt
 
 def load_json(path):
     try:
@@ -387,7 +411,6 @@ def compute_pullback_zone(direction, entry, atr, geo, price):
     buf = max(atr * 0.35, entry * 0.002)
 
     if direction == "LONG":
-        # ترجیح: پولبک به سمت پایین تا نزدیک سطح حمایتی / ۸۶٫۴٪
         candidates = []
         if level and level < entry:
             candidates.append(level)
@@ -416,7 +439,7 @@ def compute_pullback_zone(direction, entry, atr, geo, price):
         if zone_high <= zone_low:
             zone_low = zone_high - buf
 
-    return round(zone_low, 1), round(zone_high, 1)
+    return float(zone_low), float(zone_high)
 
 # -------------------- داده بازار --------------------
 
@@ -467,13 +490,13 @@ def get_current_price(symbol):
 def format_price_sources(multi):
     parts = []
     if multi["binance"]:
-        parts.append(f"Binance: <code>{p1(multi['binance'])}</code>")
+        parts.append(f"Binance: <code>{pfmt(multi['binance'])}</code>")
     if multi["coinbase"]:
-        parts.append(f"Coinbase: <code>{p1(multi['coinbase'])}</code>")
+        parts.append(f"Coinbase: <code>{pfmt(multi['coinbase'])}</code>")
     if multi["kraken"]:
-        parts.append(f"Kraken: <code>{p1(multi['kraken'])}</code>")
+        parts.append(f"Kraken: <code>{pfmt(multi['kraken'])}</code>")
     if multi["consensus"]:
-        parts.append(f"اجماع: <code>{p1(multi['consensus'])}</code>")
+        parts.append(f"اجماع: <code>{pfmt(multi['consensus'])}</code>")
     if multi.get("spread_pct") and multi["spread_pct"] > 0.15:
         parts.append(f"⚠️ اختلاف: <code>{multi['spread_pct']:.2f}%</code>")
     return " | ".join(parts) if parts else "قیمت در دسترس نیست"
@@ -621,18 +644,18 @@ def format_onchain_html(oc):
     if age is not None:
         lines.append(f"سن کش: <code>{age}</code> ساعت")
     if oc.get("price"):
-        lines.append(f"قیمت: <code>{p1(oc['price'])}</code>")
+        lines.append(f"قیمت: <code>{pfmt(oc['price'])}</code>")
     if oc.get("sth_realized_price"):
         m = f" | MVRV <code>{oc['sth_mvrv']}</code>" if oc.get("sth_mvrv") is not None else ""
-        lines.append(f"STH RP: <code>{p1(oc['sth_realized_price'])}</code>{m}")
+        lines.append(f"STH RP: <code>{pfmt(oc['sth_realized_price'])}</code>{m}")
     if oc.get("lth_realized_price"):
         m = f" | MVRV <code>{oc['lth_mvrv']}</code>" if oc.get("lth_mvrv") is not None else ""
-        lines.append(f"LTH RP: <code>{p1(oc['lth_realized_price'])}</code>{m}")
+        lines.append(f"LTH RP: <code>{pfmt(oc['lth_realized_price'])}</code>{m}")
     else:
         lines.append("LTH RP: — (اختیاری: COINGLASS_API_KEY)")
     if oc.get("realized_price"):
         m = f" | MVRV <code>{oc['overall_mvrv']}</code>" if oc.get("overall_mvrv") is not None else ""
-        lines.append(f"Realized کلی: <code>{p1(oc['realized_price'])}</code>{m}")
+        lines.append(f"Realized کلی: <code>{pfmt(oc['realized_price'])}</code>{m}")
     if oc.get("notes"):
         lines.append("\n<b>تفسیر:</b>")
         for n in oc["notes"][:5]:
@@ -642,7 +665,7 @@ def format_onchain_html(oc):
         lines.append(f'\n<a href="{chart}">Explore21</a>')
     return "\n".join(lines)
 
-# -------------------- مانیتور: SL/TP + نوتیف + پولبک زون + Pre --------------------
+# -------------------- مانیتور: SL/TP + نوتیف + پولبک زون --------------------
 
 def monitor_positions(bot: Bot):
     while True:
@@ -665,7 +688,7 @@ def monitor_positions(bot: Bot):
                         clear_signal_lock(uid, symbol)
                         clear_pullback_zone(uid, symbol)
                         try:
-                            bot.send_message(chat_id=uid, text=f"🛑 حد ضرر | <code>{esc(symbol)}</code> {p1(price)}", parse_mode="HTML")
+                            bot.send_message(chat_id=uid, text=f"🛑 حد ضرر | <code>{esc(symbol)}</code> {pfmt(price)}", parse_mode="HTML")
                         except Exception:
                             pass
                         continue
@@ -674,7 +697,7 @@ def monitor_positions(bot: Bot):
                         clear_signal_lock(uid, symbol)
                         clear_pullback_zone(uid, symbol)
                         try:
-                            bot.send_message(chat_id=uid, text=f"🎯 حد سود | <code>{esc(symbol)}</code> {p1(price)}", parse_mode="HTML")
+                            bot.send_message(chat_id=uid, text=f"🎯 حد سود | <code>{esc(symbol)}</code> {pfmt(price)}", parse_mode="HTML")
                         except Exception:
                             pass
                         continue
@@ -688,19 +711,19 @@ def monitor_positions(bot: Bot):
                         pullback = entry > 0 and (price - entry) / entry >= PULLBACK_ALERT_PCT and price < sl
                     if danger and not user_alerts.get("sl_warned"):
                         try:
-                            bot.send_message(chat_id=uid, text=f"⚠️ نزدیک SL | <code>{esc(symbol)}</code> {p1(price)}", parse_mode="HTML")
+                            bot.send_message(chat_id=uid, text=f"⚠️ نزدیک SL | <code>{esc(symbol)}</code> {pfmt(price)}", parse_mode="HTML")
                             user_alerts["sl_warned"] = True
                         except Exception:
                             pass
                     if near_tp and not user_alerts.get("tp_warned"):
                         try:
-                            bot.send_message(chat_id=uid, text=f"🎯 نزدیک TP | <code>{esc(symbol)}</code> {p1(price)}", parse_mode="HTML")
+                            bot.send_message(chat_id=uid, text=f"🎯 نزدیک TP | <code>{esc(symbol)}</code> {pfmt(price)}", parse_mode="HTML")
                             user_alerts["tp_warned"] = True
                         except Exception:
                             pass
                     if pullback and not user_alerts.get("pullback_warned"):
                         try:
-                            bot.send_message(chat_id=uid, text=f"🔄 پولبک | <code>{esc(symbol)}</code> {p1(price)}", parse_mode="HTML")
+                            bot.send_message(chat_id=uid, text=f"🔄 پولبک | <code>{esc(symbol)}</code> {pfmt(price)}", parse_mode="HTML")
                             user_alerts["pullback_warned"] = True
                         except Exception:
                             pass
@@ -725,8 +748,8 @@ def monitor_positions(bot: Bot):
                             text=(
                                 f"🔔 <b>نوتیف فوری — سیگنال پس از بسته شدن کندل ۴H</b>\n\n"
                                 f"<code>{esc(pend['symbol'])}</code> | <b>{esc(pend['direction'])}</b>\n"
-                                f"ورود پیشنهادی <code>{p1(pend['entry'])}</code>\n"
-                                f"SL <code>{p1(pend['sl'])}</code> | TP <code>{p1(pend['tp'])}</code>\n\n"
+                                f"ورود پیشنهادی <code>{pfmt(pend['entry'])}</code>\n"
+                                f"SL <code>{pfmt(pend['sl'])}</code> | TP <code>{pfmt(pend['tp'])}</code>\n\n"
                                 f"📍 ترجیح: صبر برای پولبک به منطقه ورود (اگر تعریف شده).\n"
                                 f"⏱ فرصت واکنش داری — سفارش را خودت روی XT.com بزن.\n"
                                 f"⛔ ربات ورود خودکار نمی‌کند.\n"
@@ -774,10 +797,10 @@ def monitor_positions(bot: Bot):
                                 text=(
                                     f"📍 <b>قیمت وارد منطقه پولبک شد</b>\n\n"
                                     f"<code>{esc(symbol)}</code> | <b>{esc(zone['direction'])}</b>\n"
-                                    f"قیمت الان: <code>{p1(price)}</code>\n"
-                                    f"منطقه ورود: <code>{p1(zlo)}</code> – <code>{p1(zhi)}</code>\n"
-                                    f"Entry پیشنهادی: <code>{p1(zone['entry'])}</code>\n"
-                                    f"SL <code>{p1(zone['sl'])}</code> | TP <code>{p1(zone['tp'])}</code>\n\n"
+                                    f"قیمت الان: <code>{pfmt(price)}</code>\n"
+                                    f"منطقه ورود: <code>{pfmt(zlo)}</code> – <code>{pfmt(zhi)}</code>\n"
+                                    f"Entry پیشنهادی: <code>{pfmt(zone['entry'])}</code>\n"
+                                    f"SL <code>{pfmt(zone['sl'])}</code> | TP <code>{pfmt(zone['tp'])}</code>\n\n"
                                     f"⏱ فرصت ورود روی پولبک.\n"
                                     f"⛔ ربات سفارش ثبت نمی‌کند — خودت روی XT.com اقدام کن.\n"
                                     f"<code>/confirm</code> برای ثبت ژورنال"
@@ -808,7 +831,7 @@ def monitor_positions(bot: Bot):
                             try:
                                 bot.send_message(
                                     chat_id=int(uid_str),
-                                    text=f"🚨 هشدار قیمت | <code>{esc(a['symbol'])}</code> → <code>{p1(price)}</code>",
+                                    text=f"🚨 هشدار قیمت | <code>{esc(a['symbol'])}</code> → <code>{pfmt(price)}</code>",
                                     parse_mode="HTML",
                                 )
                             except Exception:
@@ -912,6 +935,13 @@ def calc_fib(df, lookback=100):
         "0.5": h - d * 0.5, "0.618": h - d * 0.618, "0.786": h - d * 0.786, "1.0": l,
     }
 
+def nearby_fibs(fibs, price, max_n=4):
+    """فیبوهای نزدیک به قیمت فعلی برای نمودار سیگنال."""
+    if not fibs:
+        return {}
+    items = sorted(fibs.items(), key=lambda x: abs(float(x[1]) - price))
+    return dict(items[:max_n])
+
 def format_levels_block(price, df, fibs, geo):
     lines = ["📐 <b>سطوح پیش‌رو (۴H بسته‌شده)</b>"]
     last = df.iloc[-1]
@@ -921,22 +951,22 @@ def format_levels_block(price, df, fibs, geo):
             v = float(last[key])
             dist = (price - v) / price * 100
             side = "بالای" if price > v else "زیر"
-            lines.append(f"• {name}: <code>{p1(v)}</code> ({side} | {dist:+.2f}%)")
+            lines.append(f"• {name}: <code>{pfmt(v)}</code> ({side} | {dist:+.2f}%)")
     if "bb_upper" in df.columns and pd.notna(last.get("bb_upper")):
         up, mid, lo = float(last["bb_upper"]), float(last["bb_mid"]), float(last["bb_lower"])
-        lines.append(f"• BB U <code>{p1(up)}</code> | M <code>{p1(mid)}</code> | L <code>{p1(lo)}</code>")
+        lines.append(f"• BB U <code>{pfmt(up)}</code> | M <code>{pfmt(mid)}</code> | L <code>{pfmt(lo)}</code>")
         if up > lo:
             lines.append(f"• داخل باند: <code>{(price - lo) / (up - lo) * 100:.0f}%</code>")
     if fibs:
         below = sorted([(k, v) for k, v in fibs.items() if v < price], key=lambda x: -x[1])[:2]
         above = sorted([(k, v) for k, v in fibs.items() if v > price], key=lambda x: x[1])[:2]
         for k, v in above:
-            lines.append(f"• فیبو↑ {k}: <code>{p1(v)}</code> ({(v - price) / price * 100:+.2f}%)")
+            lines.append(f"• فیبو↑ {k}: <code>{pfmt(v)}</code> ({(v - price) / price * 100:+.2f}%)")
         for k, v in below:
-            lines.append(f"• فیبو↓ {k}: <code>{p1(v)}</code> ({(v - price) / price * 100:+.2f}%)")
+            lines.append(f"• فیبو↓ {k}: <code>{pfmt(v)}</code> ({(v - price) / price * 100:+.2f}%)")
     if geo.get("level_864"):
         lv = float(geo["level_864"])
-        lines.append(f"• ۸۶٫۴٪: <code>{p1(lv)}</code> ({(lv - price) / price * 100:+.2f}%)")
+        lines.append(f"• ۸۶٫۴٪: <code>{pfmt(lv)}</code> ({(lv - price) / price * 100:+.2f}%)")
     return "\n".join(lines)
 
 def classify_market_regime(df):
@@ -1049,19 +1079,6 @@ def detect_hook_structure(nodes):
             if l_i <= 3:
                 hooks.append({**n, "label": f"F{l_i}", "kind": "flag"})
     return hooks
-
-def detect_flag_lvs(df, nodes, lookback=30):
-    if df is None or len(df) < lookback + 5 or not nodes:
-        return None
-    sub = df.tail(lookback)
-    vol_mean = float(sub["volume"].mean()) or 1.0
-    last, prev = sub.iloc[-1], sub.iloc[-5]
-    move = abs(float(last["close"]) - float(prev["close"]))
-    atr = float(calc_atr(df).iloc[-1] or 0)
-    vol_last = float(sub["volume"].iloc[-3:].mean())
-    if atr > 0 and move > atr * 1.2 and vol_last < vol_mean * 0.85:
-        return {"ok": True, "price": float(last["high"] if last["close"] >= last["open"] else last["low"])}
-    return None
 
 def find_123_pattern(df, direction_bias, lookback=50):
     if df is None or len(df) < lookback:
@@ -1295,9 +1312,14 @@ def calculate_dollar_sl_tp(
         tp = entry - risk_dist * min_rr
         if tp_hint and tp_hint < entry:
             tp = min(tp, tp_hint)
-    return round(sl, 1), round(tp, 1)
+    # دقت اعشار بر اساس اندازه entry
+    if abs(entry) >= 100:
+        return round(sl, 1), round(tp, 1)
+    if abs(entry) >= 10:
+        return round(sl, 2), round(tp, 2)
+    return round(sl, 4), round(tp, 4)
 
-# -------------------- نمودار --------------------
+# -------------------- نمودارها --------------------
 
 def draw_candles(ax, df, width=0.55):
     o, h, l, c = df["open"].values, df["high"].values, df["low"].values, df["close"].values
@@ -1317,6 +1339,15 @@ def draw_hook_marker(ax, x, y, label, is_high=True):
                 color=color, fontweight="bold", zorder=16,
                 arrowprops=dict(arrowstyle="-", color=color, lw=0.8, alpha=0.7))
 
+def _price_formatter(price_sample):
+    """فرمت محور قیمت بر اساس اندازه عدد."""
+    av = abs(float(price_sample or 1))
+    if av >= 1000:
+        return FormatStrFormatter("%.1f")
+    if av >= 10:
+        return FormatStrFormatter("%.2f")
+    return FormatStrFormatter("%.4f")
+
 def create_pro_chart(
     df, title, fibs=None, entry=None, sl=None, tp=None,
     sims=None, mean_path=None, level_864=None, show_nds_hooks=False, nds_info=None,
@@ -1324,6 +1355,7 @@ def create_pro_chart(
 ):
     plot_df = df.tail(max_bars).copy().reset_index(drop=True)
     n = len(plot_df)
+    price_sample = float(plot_df["close"].iloc[-1])
     fig = plt.figure(figsize=(14, 8.6), facecolor="#0d0d0d")
     gs = GridSpec(4, 1, height_ratios=[3.7, 0.68, 0.68, 0.02], hspace=0.05)
     ax = fig.add_subplot(gs[0])
@@ -1357,10 +1389,10 @@ def create_pro_chart(
         for k, v in fibs.items():
             c = colors.get(k, "#aaaaaa")
             ax.axhline(v, color=c, ls=":", lw=0.75, alpha=0.7)
-            ax.text(n + 0.6, v, f"{k} {p1(v)}", fontsize=5.8, va="center", color=c)
+            ax.text(n + 0.6, v, f"{k} {pfmt(v)}", fontsize=5.8, va="center", color=c)
     if level_864 is not None:
         ax.axhline(level_864, color="#f1c40f", lw=1.4, ls="-.", alpha=0.95, label="86.4%")
-        ax.text(n + 0.6, level_864, f"86.4% {p1(level_864)}", fontsize=6.5, va="center", color="#f1c40f", fontweight="bold")
+        ax.text(n + 0.6, level_864, f"86.4% {pfmt(level_864)}", fontsize=6.5, va="center", color="#f1c40f", fontweight="bold")
     if pullback_zone:
         zlo, zhi = pullback_zone
         ax.axhspan(zlo, zhi, color="#3498db", alpha=0.15, label="Pullback Zone")
@@ -1384,7 +1416,7 @@ def create_pro_chart(
     ax.set_title(title, color="white", fontsize=10.5, pad=6)
     ax.legend(loc="upper left", fontsize=5.5, facecolor="#1a1a1a", edgecolor="#333", labelcolor="white", ncol=4)
     ax.grid(True, alpha=0.12, color="#444")
-    ax.yaxis.set_major_formatter(FormatStrFormatter("%.1f"))
+    ax.yaxis.set_major_formatter(_price_formatter(price_sample))
     ax.set_xlim(-1, n + 10)
     if "macd" in plot_df.columns:
         hist = plot_df["macd_hist"].values
@@ -1409,6 +1441,108 @@ def create_pro_chart(
     plt.close()
     return buf
 
+def create_entry_signal_chart(df, symbol, direction, entry, sl, tp, fibs=None, level_864=None, pullback_zone=None, max_bars=80):
+    """
+    نمودار جداگانه فقط برای سیگنال قطعی:
+    Entry / SL / TP برچسب‌دار + EMA20/50 + ATR + فیبوهای نزدیک حرکت.
+    """
+    plot_df = df.tail(max_bars).copy().reset_index(drop=True)
+    n = len(plot_df)
+    price_sample = float(plot_df["close"].iloc[-1])
+    fig = plt.figure(figsize=(13.5, 7.2), facecolor="#0d0d0d")
+    ax = fig.add_subplot(111)
+    ax.set_facecolor("#0d0d0d")
+    ax.tick_params(colors="#bbbbbb", labelsize=7)
+    for spine in ax.spines.values():
+        spine.set_color("#333333")
+    ax.yaxis.tick_right()
+    ax.yaxis.set_label_position("right")
+
+    draw_candles(ax, plot_df, width=0.6)
+
+    # فقط EMA20 و EMA50
+    if "ema20" in plot_df.columns:
+        ax.plot(plot_df["ema20"].values, color="#2ecc71", lw=1.4, label="EMA20", zorder=5)
+    if "ema50" in plot_df.columns:
+        ax.plot(plot_df["ema50"].values, color="#e74c3c", lw=1.5, label="EMA50", zorder=5)
+
+    # ATR به‌صورت نقطه‌چین
+    if "atr_upper" in plot_df.columns:
+        ax.plot(plot_df["atr_upper"].values, color="#95a5a6", lw=1.0, ls=":", alpha=0.85, label="ATR+")
+        ax.plot(plot_df["atr_lower"].values, color="#95a5a6", lw=1.0, ls=":", alpha=0.85, label="ATR-")
+
+    # فیبوهای نزدیک حرکت
+    near = nearby_fibs(fibs, entry or price_sample, max_n=5) if fibs else {}
+    fib_colors = {"0.0": "#ecf0f1", "0.236": "#e74c3c", "0.382": "#e67e22", "0.5": "#f1c40f",
+                  "0.618": "#2ecc71", "0.786": "#3498db", "1.0": "#9b59b6"}
+    for k, v in near.items():
+        c = fib_colors.get(k, "#aaaaaa")
+        ax.axhline(v, color=c, ls="--", lw=0.9, alpha=0.8)
+        ax.text(n + 0.8, v, f"Fib {k}  {pfmt(v)}", fontsize=7, va="center", color=c, fontweight="bold")
+
+    if level_864 is not None:
+        ax.axhline(level_864, color="#f1c40f", lw=1.5, ls="-.", alpha=0.95)
+        ax.text(n + 0.8, level_864, f"86.4%  {pfmt(level_864)}", fontsize=7.5, va="center",
+                color="#f1c40f", fontweight="bold")
+
+    if pullback_zone:
+        zlo, zhi = pullback_zone
+        ax.axhspan(zlo, zhi, color="#3498db", alpha=0.18, label="Pullback Zone")
+
+    # Entry / SL / TP با برچسب واضح
+    if entry is not None:
+        ax.axhline(entry, color="#2980b9", lw=2.0, zorder=8)
+        ax.annotate(
+            f"ENTRY  {pfmt(entry)}",
+            xy=(n - 1, entry), xytext=(n * 0.55, entry),
+            fontsize=9, color="#5dade2", fontweight="bold",
+            arrowprops=dict(arrowstyle="->", color="#5dade2", lw=1.2),
+            bbox=dict(boxstyle="round,pad=0.25", facecolor="#1a1a2e", edgecolor="#2980b9", alpha=0.9),
+            zorder=12,
+        )
+    if sl is not None:
+        ax.axhline(sl, color="#c0392b", lw=1.8, zorder=8)
+        ax.annotate(
+            f"SL  {pfmt(sl)}",
+            xy=(n - 1, sl), xytext=(n * 0.35, sl),
+            fontsize=8.5, color="#e74c3c", fontweight="bold",
+            arrowprops=dict(arrowstyle="->", color="#e74c3c", lw=1.1),
+            bbox=dict(boxstyle="round,pad=0.25", facecolor="#1a1a2e", edgecolor="#c0392b", alpha=0.9),
+            zorder=12,
+        )
+    if tp is not None:
+        ax.axhline(tp, color="#27ae60", lw=1.8, zorder=8)
+        ax.annotate(
+            f"TP  {pfmt(tp)}",
+            xy=(n - 1, tp), xytext=(n * 0.35, tp),
+            fontsize=8.5, color="#2ecc71", fontweight="bold",
+            arrowprops=dict(arrowstyle="->", color="#2ecc71", lw=1.1),
+            bbox=dict(boxstyle="round,pad=0.25", facecolor="#1a1a2e", edgecolor="#27ae60", alpha=0.9),
+            zorder=12,
+        )
+
+    dir_emoji = "🟢 LONG" if direction == "LONG" else "🔴 SHORT"
+    ax.set_title(f"سیگنال قطعی | {symbol} | 4H | {dir_emoji}", color="white", fontsize=12, pad=8, fontweight="bold")
+    ax.legend(loc="upper left", fontsize=6.5, facecolor="#1a1a1a", edgecolor="#333", labelcolor="white", ncol=3)
+    ax.grid(True, alpha=0.14, color="#444")
+    ax.yaxis.set_major_formatter(_price_formatter(price_sample))
+    ax.set_xlim(-1, n + 14)
+
+    # حاشیه عمودی برای خوانایی برچسب‌ها
+    ys = [y for y in [entry, sl, tp, level_864] if y is not None]
+    if near:
+        ys.extend(near.values())
+    if ys:
+        ymin, ymax = min(ys), max(ys)
+        pad = (ymax - ymin) * 0.12 or price_sample * 0.01
+        ax.set_ylim(ymin - pad, ymax + pad)
+
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png", bbox_inches="tight", dpi=155, facecolor="#0d0d0d")
+    buf.seek(0)
+    plt.close()
+    return buf
+
 def create_nds_weekly_chart(df, title, geo):
     return create_pro_chart(
         df, title, fibs=calc_fib(df, lookback=min(80, len(df))),
@@ -1426,7 +1560,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🕒 سشن: <b>{esc(sess['name'])}</b> (UTC {sess['utc_hour']:02d})\n\n"
         "⛔ ورود خودکار هرگز انجام نمی‌شود.\n"
         "سیگنال فقط پس از بسته شدن کندل ۴H.\n"
-        "🔔 Pre-Alert نزدیک سیگنال + نوتیف منطقه پولبک.\n"
+        "🔔 Pre-Alert + نوتیف منطقه پولبک + نمودار جداگانه Entry.\n"
+        f"جفت‌های پیش‌فرض: <code>{DEFAULT_SYMBOLS[0]}</code> و <code>{DEFAULT_SYMBOLS[1]}</code>\n"
         "ثبت فقط با <code>/confirm</code>.\n\n"
         "<code>/predict</code> <code>/nds</code> <code>/onchain</code> <code>/market</code>\n"
         "<code>/confirm</code> <code>/position</code> <code>/close</code>\n"
@@ -1508,7 +1643,7 @@ async def alert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("above یا below")
             return
         a = add_price_alert(uid, symbol, target, condition)
-        await update.message.reply_text(f"✅ <code>{a['id']}</code> | {esc(symbol)} {condition} {p1(target)}", parse_mode="HTML")
+        await update.message.reply_text(f"✅ <code>{a['id']}</code> | {esc(symbol)} {condition} {pfmt(target)}", parse_mode="HTML")
     except Exception as e:
         await update.message.reply_text(f"خطا: {esc(str(e)[:80])}")
 
@@ -1523,7 +1658,7 @@ async def alerts_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not alerts:
         await update.message.reply_text("هشداری نیست.")
         return
-    lines = ["🚨 هشدارها"] + [f"• <code>{a['id']}</code> {esc(a['symbol'])} {a['condition']} {p1(a['target'])}" for a in alerts]
+    lines = ["🚨 هشدارها"] + [f"• <code>{a['id']}</code> {esc(a['symbol'])} {a['condition']} {pfmt(a['target'])}" for a in alerts]
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 async def removealert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1587,7 +1722,7 @@ async def watchlist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             higher = nds_d["bias"] if nds_d.get("bias") != "خنثی" else nds_4h["bias"]
             price = float(df_4h["close"].iloc[-1])
             emoji = "🟢" if higher == "صعودی" else "🔴" if higher == "نزولی" else "⚪️"
-            lines.append(f"{emoji} <code>{esc(symbol)}</code> {esc(higher)} <code>{p1(price)}</code>")
+            lines.append(f"{emoji} <code>{esc(symbol)}</code> {esc(higher)} <code>{pfmt(price)}</code>")
         except Exception:
             lines.append(f"• {symbol}: خطا")
     await status.edit_text("\n".join(lines), parse_mode="HTML")
@@ -1611,7 +1746,7 @@ async def confirm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clear_pullback_zone(uid, pending["symbol"])
     await update.message.reply_text(
         f"✅ ثبت دستی\n<code>{esc(pending['symbol'])}</code> {esc(pending['direction'])}\n"
-        f"ورود {p1(pending['entry'])} | SL {p1(pending['sl'])} | TP {p1(pending['tp'])}\n"
+        f"ورود {pfmt(pending['entry'])} | SL {pfmt(pending['sl'])} | TP {pfmt(pending['tp'])}\n"
         f"سفارش صرافی با خودتان است.",
         parse_mode="HTML",
     )
@@ -1707,10 +1842,10 @@ async def position_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     multi = get_multi_exchange_prices(pos["symbol"])
     price = multi["consensus"] or multi["binance"]
-    text = f"📌 <code>{esc(pos['symbol'])}</code> {esc(pos['direction'])}\nورود {p1(pos['entry'])} SL {p1(pos['sl'])} TP {p1(pos['tp'])}\n"
+    text = f"📌 <code>{esc(pos['symbol'])}</code> {esc(pos['direction'])}\nورود {pfmt(pos['entry'])} SL {pfmt(pos['sl'])} TP {pfmt(pos['tp'])}\n"
     if price:
         pnl_pct = ((price - pos["entry"]) / pos["entry"] * 100) if pos["direction"] == "LONG" else ((pos["entry"] - price) / pos["entry"] * 100)
-        text += f"قیمت {p1(price)} | PnL {pnl_pct:.2f}%\n{format_price_sources(multi)}"
+        text += f"قیمت {pfmt(price)} | PnL {pnl_pct:.2f}%\n{format_price_sources(multi)}"
     await update.message.reply_text(text, parse_mode="HTML")
 
 async def close_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1757,7 +1892,7 @@ async def market_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             nds_4h = analyze_nds(closed_klines(df_4h))
             higher = nds_d["bias"] if nds_d.get("bias") != "خنثی" else nds_4h["bias"]
             emoji = "🟢" if higher == "صعودی" else "🔴" if higher == "نزولی" else "⚪️"
-            lines.append(f"{emoji} <code>{esc(symbol)}</code> {esc(higher)} <code>{p1(df_4h['close'].iloc[-1])}</code>")
+            lines.append(f"{emoji} <code>{esc(symbol)}</code> {esc(higher)} <code>{pfmt(df_4h['close'].iloc[-1])}</code>")
         except Exception:
             lines.append(f"• {symbol}: خطا")
     await status.edit_text("\n".join(lines), parse_mode="HTML")
@@ -1772,7 +1907,23 @@ async def nds_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_subscribed(uid) and not is_admin(uid):
         await update.message.reply_text("❌ دسترسی ندارید.")
         return
-    symbol = context.args[0].upper() if context.args else "BTCUSDT"
+    # بدون آرگومان → پرسش پیش‌فرض
+    if not context.args:
+        keyboard = [
+            [
+                InlineKeyboardButton("BTCUSDT", callback_data="nds:BTCUSDT"),
+                InlineKeyboardButton("QNTUSDT", callback_data="nds:QNTUSDT"),
+            ]
+        ]
+        await update.message.reply_text(
+            "کدام جفت‌ارز پیش‌فرض را برای NDS تحلیل کنم؟",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+    symbol = context.args[0].upper()
+    await _run_nds(update, symbol)
+
+async def _run_nds(update: Update, symbol: str):
     status = await update.message.reply_text(f"⏳ NDS {esc(symbol)}", parse_mode="HTML")
     try:
         df_1w = fetch_klines(symbol, "1w", 150)
@@ -1788,8 +1939,8 @@ async def nds_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         caption = clip_caption(
             f"🧬 <b>{esc(symbol)}</b> | {esc(geo['bias'])} | {esc(geo['cycle'])}\n"
             f"مجاز: {'✅' if geo['trade_allowed'] else '❌'} | {esc(geo['reason'])}\n"
-            f"مقاومت {p1(geo.get('last_high'))} | حمایت {p1(geo.get('last_low'))}\n"
-            f"۸۶٫۴٪ {p1(geo.get('level_864'))} | قیمت {p1(price)}"
+            f"مقاومت {pfmt(geo.get('last_high'))} | حمایت {pfmt(geo.get('last_low'))}\n"
+            f"۸۶٫۴٪ {pfmt(geo.get('level_864'))} | قیمت {pfmt(price)}"
         )
         await update.message.reply_photo(photo=buf, caption=caption, parse_mode="HTML")
         multi_nds = analyze_nds_multi(symbol, current_price=price)
@@ -1815,13 +1966,63 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_subscribed(uid) and not is_admin(uid):
         await update.message.reply_text("❌ دسترسی ندارید.")
         return
+
     args = context.args
-    symbol = args[0].upper() if args else "BTCUSDT"
+    # بدون نماد → پرسش پیش‌فرض BTC / QNT
+    if not args:
+        keyboard = [
+            [
+                InlineKeyboardButton("BTCUSDT", callback_data="predict:BTCUSDT"),
+                InlineKeyboardButton("QNTUSDT", callback_data="predict:QNTUSDT"),
+            ]
+        ]
+        await update.message.reply_text(
+            "کدام جفت‌ارز پیش‌فرض را تحلیل کنم؟\n"
+            f"(یا بنویس: <code>/predict BTCUSDT</code> / <code>/predict QNTUSDT</code>)",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="HTML",
+        )
+        return
+
+    symbol = args[0].upper()
     try:
         margin = float(args[1]) if len(args) > 1 else DEFAULT_MARGIN
         lev = float(args[2]) if len(args) > 2 else DEFAULT_LEVERAGE
     except Exception:
         margin, lev = DEFAULT_MARGIN, DEFAULT_LEVERAGE
+
+    await _run_predict(update, uid, symbol, margin, lev)
+
+async def symbol_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """پاسخ به دکمه‌های پیش‌فرض BTC / QNT برای /predict و /nds."""
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+    data = (query.data or "").strip()
+    if ":" not in data:
+        return
+    action, symbol = data.split(":", 1)
+    symbol = symbol.upper()
+    uid = query.from_user.id
+    if not is_subscribed(uid) and not is_admin(uid):
+        await query.edit_message_text("❌ دسترسی ندارید.")
+        return
+    # برای پیام‌های callback، update.message ممکن است None باشد؛ از query.message استفاده می‌کنیم
+    class _FakeUpdate:
+        def __init__(self, message, effective_user, effective_chat):
+            self.message = message
+            self.effective_user = effective_user
+            self.effective_chat = effective_chat
+    fake = _FakeUpdate(query.message, query.from_user, query.message.chat if query.message else None)
+    if action == "predict":
+        await query.edit_message_text(f"⏳ در حال تحلیل <code>{esc(symbol)}</code> ...", parse_mode="HTML")
+        await _run_predict(fake, uid, symbol, DEFAULT_MARGIN, DEFAULT_LEVERAGE)
+    elif action == "nds":
+        await query.edit_message_text(f"⏳ NDS <code>{esc(symbol)}</code> ...", parse_mode="HTML")
+        await _run_nds(fake, symbol)
+
+async def _run_predict(update: Update, uid: int, symbol: str, margin: float, lev: float):
     open_pos = get_open_position(uid)
     status = await update.message.reply_text(f"⏳ {esc(symbol)} (۴H بسته) ...", parse_mode="HTML")
     try:
@@ -1923,20 +2124,30 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     risks.append(f"امتیاز {score} < {min_score_now}")
 
             if direction:
-                entry = round(price, 1)
+                # دقت ورود بر اساس اندازه قیمت
+                if abs(price) >= 100:
+                    entry = round(price, 1)
+                elif abs(price) >= 10:
+                    entry = round(price, 2)
+                else:
+                    entry = round(price, 4)
                 sl, tp = calculate_dollar_sl_tp(
                     entry, direction, atr, margin, lev, RISK_PER_TRADE,
                     structure_low=geo.get("last_low"), structure_high=geo.get("last_high"),
                     sl_hint=geo.get("sl_hint"), tp_hint=geo.get("tp_hint"), min_rr=MIN_RR,
                 )
                 set_signal_lock(uid, symbol, direction, entry, sl, tp, score, geo.get("reason") or "", session["name"], candle_close_ts)
-                # منطقه پولبک
                 zlo, zhi = compute_pullback_zone(direction, entry, atr, geo, price)
                 set_pullback_zone(uid, symbol, direction, zlo, zhi, entry, sl, tp, score)
             else:
-                entry = round(price, 1)
-                sl = round(price - atr * 1.6, 1)
-                tp = round(price + atr * 1.6 * MIN_RR, 1)
+                if abs(price) >= 100:
+                    entry = round(price, 1)
+                elif abs(price) >= 10:
+                    entry = round(price, 2)
+                else:
+                    entry = round(price, 4)
+                sl = round(price - atr * 1.6, 4 if abs(price) < 10 else 2 if abs(price) < 100 else 1)
+                tp = round(price + atr * 1.6 * MIN_RR, 4 if abs(price) < 10 else 2 if abs(price) < 100 else 1)
 
         # ---------- Pre-Alert ----------
         pre_sent = False
@@ -1972,6 +2183,7 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if z:
                 pb_zone = (float(z["zone_low"]), float(z["zone_high"]))
 
+        # نمودار اصلی تحلیل
         buf = create_pro_chart(
             df_4h, f"{symbol} | 4H closed | {higher}",
             fibs=fibs,
@@ -1996,16 +2208,16 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if is_strong and direction:
             caption = clip_caption(
                 f"📋 <b>{esc(symbol)}</b> | {now_utc}\n"
-                f"{q} {esc(session['name'])} | ۴H بسته close <code>{p1(signal_price)}</code>\n"
+                f"{q} {esc(session['name'])} | ۴H بسته close <code>{pfmt(signal_price)}</code>\n"
                 f"سیگنال: <b>{signal}</b> | امتیاز <code>{score}</code>/{min_score_now}\n"
-                f"ورود <code>{p1(entry)}</code> | SL <code>{p1(sl)}</code> | TP <code>{p1(tp)}</code>\n"
+                f"ورود <code>{pfmt(entry)}</code> | SL <code>{pfmt(sl)}</code> | TP <code>{pfmt(tp)}</code>\n"
                 f"R:R 1:{rr:.1f} | NDS {esc(higher)}\n"
                 f"📍 منطقه پولبک فعال — ⛔ ورود خودکار نیست"
             )
         else:
             caption = clip_caption(
                 f"📋 <b>{esc(symbol)}</b> | {now_utc}\n"
-                f"{q} {esc(session['name'])} | ۴H بسته close <code>{p1(signal_price)}</code>\n"
+                f"{q} {esc(session['name'])} | ۴H بسته close <code>{pfmt(signal_price)}</code>\n"
                 f"سیگنال: <b>{signal}</b> | امتیاز <code>{score}</code>/{min_score_now}\n"
                 f"NDS محلی: <b>{esc(geo.get('bias'))}</b> | بالاتر: <b>{esc(higher)}</b>\n"
                 f"{esc(nds_note)}\n"
@@ -2013,21 +2225,42 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         await update.message.reply_photo(photo=buf, caption=caption, parse_mode="HTML")
 
+        # ---------- نمودار جداگانه فقط برای سیگنال قطعی ----------
+        if is_strong and direction and entry is not None and sl is not None and tp is not None:
+            try:
+                entry_buf = create_entry_signal_chart(
+                    df_4h, symbol, direction, entry, sl, tp,
+                    fibs=fibs, level_864=geo.get("level_864"),
+                    pullback_zone=pb_zone, max_bars=80,
+                )
+                entry_caption = clip_caption(
+                    f"🎯 <b>نمودار سیگنال قطعی | {esc(symbol)} | 4H</b>\n"
+                    f"{'🟢 LONG' if direction == 'LONG' else '🔴 SHORT'}\n"
+                    f"ENTRY <code>{pfmt(entry)}</code>\n"
+                    f"SL <code>{pfmt(sl)}</code>  |  TP <code>{pfmt(tp)}</code>\n"
+                    f"R:R 1:{rr:.1f} | امتیاز {score}\n"
+                    f"EMA20 · EMA50 · ATR · فیبو نزدیک\n"
+                    f"⛔ ورود خودکار نیست — سفارش روی XT.com با خودت"
+                )
+                await update.message.reply_photo(photo=entry_buf, caption=entry_caption, parse_mode="HTML")
+            except Exception as e:
+                print("Entry chart error:", e)
+
         detail1 = (
             f"<b>NDS</b>\n• مجوز {'✅' if geo.get('trade_allowed') else '❌'} | {esc(geo.get('reason'))}\n"
-            f"• مقاومت <code>{p1(geo.get('last_high'))}</code> | حمایت <code>{p1(geo.get('last_low'))}</code>\n\n"
+            f"• مقاومت <code>{pfmt(geo.get('last_high'))}</code> | حمایت <code>{pfmt(geo.get('last_low'))}</code>\n\n"
             + format_levels_block(signal_price, df_4h, fibs, geo)
         )
         if is_strong and pb_zone:
             detail1 += (
                 f"\n\n📍 <b>منطقه ورود ترجیحی (پولبک)</b>\n"
-                f"• <code>{p1(pb_zone[0])}</code> – <code>{p1(pb_zone[1])}</code>\n"
+                f"• <code>{pfmt(pb_zone[0])}</code> – <code>{pfmt(pb_zone[1])}</code>\n"
                 f"• وقتی قیمت وارد این بازه شد نوتیف می‌گیری."
             )
         elif not is_strong:
             detail1 += (
                 f"\n\n📌 <b>سطوح فرضی (ورود مجاز نیست)</b>\n"
-                f"• فرضی Entry <code>{p1(entry)}</code> | SL <code>{p1(sl)}</code> | TP <code>{p1(tp)}</code>"
+                f"• فرضی Entry <code>{pfmt(entry)}</code> | SL <code>{pfmt(sl)}</code> | TP <code>{pfmt(tp)}</code>"
             )
         await update.message.reply_text(detail1, parse_mode="HTML")
 
@@ -2048,7 +2281,7 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             detail2 += "\n\n" + format_onchain_html(onchain)
         if obs:
             detail2 += "\n\n<b>OB</b>\n" + "\n".join(
-                [f"• {'↑' if o['type']=='bullish_ob' else '↓'} <code>{p1(o['low'])}</code>–<code>{p1(o['high'])}</code>" for o in obs]
+                [f"• {'↑' if o['type']=='bullish_ob' else '↓'} <code>{pfmt(o['low'])}</code>–<code>{pfmt(o['high'])}</code>" for o in obs]
             )
         await update.message.reply_text(detail2, parse_mode="HTML")
 
@@ -2063,10 +2296,10 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 mark_notified(uid, symbol, candle_close_ts)
             ztxt = ""
             if pb_zone:
-                ztxt = f"\n📍 منطقه پولبک: <code>{p1(pb_zone[0])}</code>–<code>{p1(pb_zone[1])}</code>\n(وقتی قیمت رسید نوتیف جدا می‌آید)"
+                ztxt = f"\n📍 منطقه پولبک: <code>{pfmt(pb_zone[0])}</code>–<code>{pfmt(pb_zone[1])}</code>\n(وقتی قیمت رسید نوتیف جدا می‌آید)"
             await update.message.reply_text(
                 f"🔔 نوتیف سیگنال (۴H بسته)\n{esc(direction)} | <code>{esc(symbol)}</code>\n"
-                f"ورود {p1(entry)} | SL {p1(sl)} | TP {p1(tp)} | R:R 1:{rr:.1f}"
+                f"ورود {pfmt(entry)} | SL {pfmt(sl)} | TP {pfmt(tp)} | R:R 1:{rr:.1f}"
                 f"{ztxt}\n"
                 f"⛔ سفارش صرافی خودکار نیست.\n<code>/confirm</code> فقط ثبت ژورنال\n\n{DISCLAIMER}",
                 parse_mode="HTML",
@@ -2100,7 +2333,8 @@ def main():
         ("adduser", adduser), ("removeuser", removeuser), ("listusers", listusers),
     ]:
         application.add_handler(CommandHandler(cmd, handler))
-    print("Kronos Stable | Pre-Alert + Pullback Zone | no auto-entry")
+    application.add_handler(CallbackQueryHandler(symbol_callback, pattern=r"^(predict|nds):"))
+    print("Kronos Stable | Entry Chart + Pre-Alert + Pullback | defaults BTC/QNT | no auto-entry")
     application.run_polling()
 
 if __name__ == "__main__":
